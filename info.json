@@ -1,0 +1,54 @@
+{
+  "functions": [
+    {
+      "name": "Set_Latch_Mistrack",
+      "abstract": "Latches AOA mistrack failures after the required persistence"
+    },
+    {
+      "name": "Level1_Fail",
+      "abstract": "Detects AOA mistrack between the left and right sensor pairs"
+    },
+    {
+      "name": "Select_AOA",
+      "abstract": "Selects the AOA value based on sensor failure status."
+    }
+  ],
+  "variables": [
+    {
+      "name": "AOA_MISTRACK_UNLTCH1_LIST",
+      "abstract": "Array of unlatched AOA mistrack failure flags. A set flag indicates that the corresponding AOA sensor pair currently has a mechanical mistrack condition, where the deviation between two sensors expected to provide similar values exceeds the allowed threshold. The failure may clear if the mistrack condition disappears."
+    },
+    {
+      "name": "AOA_MISTRACK_PERS_CNT",
+      "abstract": "Array of persistence counters used to measure how long an AOA mistrack condition remains continuously active before the failure is latched."
+    },
+    {
+      "name": "AOA_MISTRACK_LTCH_LIST",
+      "abstract": "Array of latched AOA mistrack failure flags. A set flag indicates a confirmed mechanical mistrack failure that has persisted for the required duration and cannot be cleared when the mistrack condition subsequently disappears."
+    },
+    {
+      "name": "LOCANG_EFAIL_LTCH_LIST",
+      "abstract": "Array of latched AOA electrical or data-path failure flags. A set flag indicates a confirmed electrical or data-path failure that cannot be cleared when the failure condition disappears."
+    },
+    {
+      "name": "LOCANG_EFAIL_UNLTCH_LIST",
+      "abstract": "Array of unlatched AOA electrical or data-path failure flags. A set flag indicates a currently detected electrical or data-path failure that may clear when the failure condition disappears."
+    },
+    {
+      "name": "AOA_MFADP_VAL_LIST",
+      "abstract": "Array containing the current processed AOA values from the L1, L2, R1 and R2 sensors. L1 is used as the representative value of the L1-L2 pair and R1 is used as the representative value of the R1-R2 pair during AOA selection."
+    },
+    {
+      "name": "AOA_SSA_COMB_FAIL_SUPRESS",
+      "abstract": "Mistrack suppression condition used during transient aircraft conditions such as gusts, where temporary differences between AOA or SSA sensor measurements are expected and should not result in a mistrack failure."
+    },
+    {
+      "name": "TH_CAS_MFADP",
+      "abstract": "Condition indicating that calibrated airspeed is within the permitted threshold or operating region for AOA mistrack detection."
+    },
+    {
+      "name": "AOA_SELECTED",
+      "abstract": "Retained final selected AOA value. It contains the average of L1 and R1 when both sensor pairs are healthy, the value from the remaining healthy pair when one pair has failed, or the previously selected value when both sensor pairs have failed."
+    }
+  ]
+}
