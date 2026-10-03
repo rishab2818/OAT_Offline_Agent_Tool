@@ -98,6 +98,9 @@ class OllamaClient:
     def models(self):
         return [m["name"] for m in self.request("/api/tags").get("models", [])]
 
+    def show(self, model):
+        return self.request("/api/show", {"model": model})
+
     def chat(self, messages, schemas, config, mode):
         payload = {"model": config.model, "messages": messages, "stream": False,
                    "options": config.options, "keep_alive": "5m"}

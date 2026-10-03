@@ -58,6 +58,66 @@ class TaskManager:
                       "requirements": copy.deepcopy(self.requirements)}
         self._save()
 
+    def allowed_tools(self):
+        """Return only tools useful for the current host-owned action."""
+        controls = {"report_blocker", "task_evidence"}
+        if not self.state:
+            return set(self.enabled_tools) | controls
+        if self.state.get("direct"):
+            text = self.state.get("request", "").casefold()
+            selected = {"read_file"}
+            if any(word in text for word in ("create", "write", "save", "generate", "output", "file")):
+                selected |= {"write_file", "edit_file"}
+            if any(word in text for word in ("edit", "modify", "update", "replace", "fix")):
+                selected |= {"edit_file", "write_file"}
+            if any(word in text for word in ("run", "execute", "test", "build", "compile", "install", "command")):
+                selected.add("run_command")
+            if any(word in text for word in ("find", "search", "locate")):
+                selected |= {"find_files", "search_text"}
+            if any(word in text for word in ("list", "folder", "directory", "files")):
+                selected |= {"list_files", "find_files"}
+            # Ambiguous action prompts retain the complete execution surface so
+            # optimization never makes a valid task impossible.
+            if selected == {"read_file"} and not any(word in text for word in
+                    ("read", "inspect", "review", "summar", "explain", "analy", "verify")):
+                selected = set(self.enabled_tools)
+            return (selected & self.enabled_tools) | controls
+        current = self.current()
+        if not self.state.get("steps"):
+            return (READ_TOOLS & self.enabled_tools) | {"plan_task", "task_status", "report_blocker"}
+        if current and current.get("kind") == "foreach":
+            return ({"expand_task", "task_status", "task_evidence", "report_blocker"}
+                    | ({"read_file", "list_files", "find_files", "run_command"} & self.enabled_tools))
+        required = {check["name"] for check in (current or {}).get("checks", [])
+                    if check.get("type") == "tool"}
+        return (required | (READ_TOOLS & self.enabled_tools)
+                | {"complete_task_step", "task_status", "task_evidence", "report_blocker"})
+
+    def progress(self):
+        if not self.state:
+            return None
+        started = self.state.get("created_at")
+        try:
+            elapsed = max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(started)).total_seconds())
+        except (TypeError, ValueError):
+            elapsed = 0
+        if self.state.get("direct"):
+            evidence = self.state.get("steps", [{}])[0].get("evidence", []) if self.state.get("steps") else []
+            return {"done": 0, "total": 0, "current": "Executing request",
+                    "elapsed_seconds": round(elapsed), "estimate": None,
+                    "actions_recorded": len(evidence)}
+        steps = [step for step in self._all() if step.get("kind") == "action"]
+        done = sum(step.get("status") == "done" for step in steps)
+        total = len(steps)
+        estimate = None
+        if done and total > done:
+            expected = elapsed / done * (total - done)
+            estimate = {"low_seconds": round(expected * 0.7), "high_seconds": round(expected * 1.4)}
+        current = self.current()
+        return {"done": done, "total": total, "current": current.get("title") if current else None,
+                "elapsed_seconds": round(elapsed), "estimate": estimate,
+                "actions_recorded": None}
+
     def history(self):
         """List saved tasks newest-first; numbering is accepted by resume/rerun."""
         entries = []

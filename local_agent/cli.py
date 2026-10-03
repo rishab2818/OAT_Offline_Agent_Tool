@@ -15,6 +15,7 @@ from .command_tools import register_command_tools
 from .file_tools import register_file_tools
 from .ollama import OllamaClient, OllamaError
 from .preferences import load_preferences, setup_wizard
+from .profiles import ModelProfiles
 from .registry import Registry
 from .storage import RunLog, private_directory, workspace_lock
 from .workspace import Workspace, ToolError
@@ -34,8 +35,9 @@ class WorkspaceSwitch(Exception):
 
 
 class ModelSwitch(Exception):
-    def __init__(self, model):
+    def __init__(self, model, resume=False):
         self.model = model
+        self.resume = resume
 
 
 class ReloadSession(Exception):
@@ -68,23 +70,37 @@ def workspace_argv(argv, path):
     return [*result, "--workspace", str(path)]
 
 
-def model_argv(argv, model):
+def model_argv(argv, model, resume=False):
     result, skip = [], False
     for value in argv:
         if skip:
             skip = False
             continue
-        if value == "--model":
+        if value in {"--model", "--resume"}:
             skip = True
             continue
-        if value.startswith("--model="):
+        if value.startswith("--model=") or value.startswith("--resume="):
             continue
         result.append(value)
-    return [*result, "--model", model]
+    result = [*result, "--model", model]
+    return [*result, "--resume", "latest"] if resume else result
 
 
 def reload_argv(argv):
     return [value for value in argv if value != "--setup"]
+
+
+def apply_model_profile(config, profile, preferences, args):
+    if not profile:
+        return
+    if not profile.get("thinking_supported", True) and args.think is None:
+        config.think = None
+    if config.tool_mode == "auto" and profile.get("recommended_tool_mode") == "json":
+        config.tool_mode = "json"
+    if not args.timeout_seconds and not preferences.get("timeout_seconds"):
+        config.timeout_seconds = profile.get("recommended_timeout_seconds", config.timeout_seconds)
+    if not preferences.get("context_tokens"):
+        config.options["num_ctx"] = profile.get("recommended_context_tokens", config.options.get("num_ctx"))
 
 
 def clear_saved_data(directory, scope, current_log=None, current_task=None):
@@ -145,25 +161,28 @@ def selected_instruction_documents(config, workspace):
     return documents
 
 
-def load_instructions(config, workspace):
+def selected_agent_document(config, workspace):
+    if config.agent_file:
+        path = (workspace.root / config.agent_file).resolve()
+        return (path, path.read_text(encoding="utf-8-sig"))
+    for name in ("agent.md", "AGENTS.md"):
+        path = workspace.root / name
+        if path.is_file():
+            return (path.resolve(), path.read_text(encoding="utf-8-sig"))
+    return None
+
+
+def load_instructions(config, workspace, documents=None):
     chunks = []
     if config.system_prompt:
         chunks.append(Path(config.system_prompt).read_text(encoding="utf-8-sig"))
-    for instruction_path, content in selected_instruction_documents(config, workspace):
+    for instruction_path, content in (documents if documents is not None else selected_instruction_documents(config, workspace)):
         if len(content) > config.max_file_chars:
             raise ToolError(f"Instruction file exceeds size limit: {instruction_path}")
         chunks.append(f"\nUser-selected task instructions ({instruction_path}):\n{content}")
-    agent_path = None
-    if config.agent_file:
-        agent_path = (workspace.root / config.agent_file).resolve()
-    else:
-        for name in ("agent.md", "AGENTS.md"):
-            candidate = workspace.root / name
-            if candidate.is_file():
-                agent_path = candidate
-                break
-    if agent_path:
-        content = agent_path.read_text(encoding="utf-8-sig")
+    agent_document = selected_agent_document(config, workspace)
+    if agent_document:
+        agent_path, content = agent_document
         if len(content) > config.max_file_chars:
             raise ToolError("Optional agent instruction file exceeds size limit")
         chunks.append(f"\nAdditional project instructions ({agent_path.name}):\n{content}")
@@ -203,7 +222,12 @@ def _main(argv=None):
         if args.think is not None:
             config.think = {"true": True, "false": False, "default": None}.get(args.think, args.think)
         workspace = Workspace(config.workspace, config.max_file_chars)
-        instructions = load_instructions(config, workspace)
+        instruction_documents = selected_instruction_documents(config, workspace)
+        routing_documents = list(instruction_documents)
+        agent_document = selected_agent_document(config, workspace)
+        if agent_document:
+            routing_documents.append(agent_document)
+        instructions = load_instructions(config, workspace, instruction_documents)
         client = OllamaClient(config.base_url, config.timeout_seconds)
         first_run = (not preferences.get("setup_complete") and sys.stdin.isatty()
                      and args.prompt is None and args.prompt_file is None and not args.resume and not args.doctor)
@@ -211,6 +235,12 @@ def _main(argv=None):
             setup_wizard(client, config)
             raise ReloadSession()
         ui = TerminalUI(args.ui_mode or preferences.get("ui_mode", "compact"))
+        profiles = ModelProfiles()
+        profile = profiles.get(config.model)
+        if profile is None and sys.stdin.isatty() and args.prompt is None and args.prompt_file is None and not args.resume:
+            profile = profiles.probe(client, config.model, config.options.get("num_ctx", 8192), ui.write)
+        apply_model_profile(config, profile, preferences, args)
+        client.timeout = config.timeout_seconds
         if args.doctor:
             models = client.models()
             available = config.model in models or config.model + ":latest" in models
@@ -232,7 +262,7 @@ def _main(argv=None):
             registry = Registry()
             register_file_tools(registry, workspace, config)
             register_command_tools(registry, workspace, config)
-            requirements = workflow_contract(selected_instruction_documents(config, workspace))
+            requirements = workflow_contract(instruction_documents)
             tasks = TaskManager(workspace, directory, config.enabled_tools, requirements,
                                 direct_mode=not requirements,
                                 metadata={"model": config.model, "context_tokens": config.options.get("num_ctx"),
@@ -241,7 +271,8 @@ def _main(argv=None):
             registry.select(list(config.enabled_tools) + sorted(CONTROL_TOOLS))
             ui.banner(__version__, config, log.path)
             log.write("session", runtime_version=__version__, config=vars(config), instructions=instructions)
-            agent = Agent(client, registry, config, instructions, log, tasks=tasks, emit=ui.emit)
+            agent = Agent(client, registry, config, instructions, log, tasks=tasks, emit=ui.emit,
+                          instruction_documents=routing_documents, workspace=workspace.root)
             def run(prompt, resume=False):
                 if not prompt.strip():
                     raise ValueError("Prompt cannot be empty")
@@ -328,8 +359,11 @@ def _main(argv=None):
                           "/workspace PATH = restart this session in another folder. "
                           "/models = list locally installed Ollama models. "
                           "/model NUMBER|NAME = switch to an installed model. "
+                          "/profiles = show saved capability profiles; /profiles test-all tests every model once. "
                           "/review [number|id] = show files and commands from a task. "
                           "/artifacts [number|id] = show task artifacts. /ui compact|detailed = change display. "
+                          "/tokens = show model token and prompt-overhead telemetry. "
+                          "/retry and /retry --short-context recover the latest incomplete task. "
                           "/settings = show active model limits. /clear logs|tasks|all = remove old records. "
                           "/context TOKENS and /timeout SECONDS change this session's model limits. "
                           "/trace on|off = toggle full terminal tracing. "
@@ -341,9 +375,11 @@ def _main(argv=None):
   Work       Type any request
   Progress   /status or /plan
   Results    /review, /artifacts
+  Usage      /tokens
   History    /history, /history failed, /history search WORDS
   Continue   /resume NUMBER, /rerun NUMBER
-  Models     /models, /model NUMBER
+  Recover    /retry, /retry --short-context, /retry --model NAME
+  Models     /models, /model NUMBER, /profiles
   Workspace  /workspace PATH
   Display    /ui compact, /ui detailed
   Setup      /setup
@@ -358,6 +394,9 @@ def _main(argv=None):
                     continue
                 if prompt == "/logs":
                     ui.write(str(log.path))
+                    continue
+                if prompt == "/tokens":
+                    ui.show_json(agent.token_usage())
                     continue
                 if prompt in {"/plan", "/status"}:
                     print(json.dumps(tasks.status(), indent=2, ensure_ascii=False))
@@ -410,7 +449,10 @@ def _main(argv=None):
                         print("Installed Ollama models:")
                         for number, name in enumerate(installed, 1):
                             marker = " * current" if name == config.model or name == config.model + ":latest" else ""
-                            print(f"  {number}. {name}{marker}")
+                            tested = profiles.get(name)
+                            detail = (f" | native {tested['native_tool_reliability']:.0%} | "
+                                      f"{tested.get('tokens_per_second') or '?'} tok/s") if tested else " | untested"
+                            print(f"  {number}. {name}{marker}{detail}")
                         print("Switch with /model NUMBER or /model NAME")
                     continue
                 if prompt == "/model" or prompt.startswith("/model "):
@@ -434,8 +476,28 @@ def _main(argv=None):
                     if selected == config.model or selected == config.model + ":latest":
                         print(f"Already using {config.model}.")
                         continue
+                    if profiles.get(selected) is None:
+                        profiles.probe(client, selected, config.options.get("num_ctx", 8192), ui.write)
                     print(f"Switching model to {selected}...", flush=True)
                     raise ModelSwitch(selected)
+                if prompt == "/profiles" or prompt.startswith("/profiles "):
+                    argument = prompt.split(maxsplit=1)[1].strip() if " " in prompt else ""
+                    if argument in {"test-all", "refresh-all"}:
+                        for name in client.models():
+                            profiles.probe(client, name, config.options.get("num_ctx", 8192), ui.write,
+                                           force=argument == "refresh-all")
+                    elif argument.startswith("test ") or argument.startswith("refresh "):
+                        action, name = argument.split(maxsplit=1)
+                        if name not in client.models():
+                            ui.write(f"Model is not installed: {name}")
+                        else:
+                            profiles.probe(client, name, config.options.get("num_ctx", 8192), ui.write,
+                                           force=action == "refresh")
+                    elif argument:
+                        ui.write("Usage: /profiles, /profiles test MODEL, /profiles test-all, /profiles refresh MODEL")
+                    else:
+                        ui.show_json(profiles.all())
+                    continue
                 if prompt.startswith("/clear "):
                     scope = prompt.split(maxsplit=1)[1].strip().lower()
                     if scope not in {"logs", "tasks", "all"}:
@@ -513,6 +575,28 @@ def _main(argv=None):
                     except ToolError as exc:
                         ui.write(f"Error: {exc}")
                     continue
+                if prompt == "/retry" or prompt.startswith("/retry "):
+                    option = prompt.split(maxsplit=1)[1].strip() if " " in prompt else ""
+                    try:
+                        if option.startswith("--model "):
+                            selected = option.split(maxsplit=1)[1].strip()
+                            if selected not in client.models():
+                                ui.write(f"Model is not installed: {selected}")
+                                continue
+                            raise ModelSwitch(selected, resume=True)
+                        if option == "--short-context":
+                            config.options["num_ctx"] = max(4096, config.options.get("num_ctx", 32768) // 2)
+                            ui.write(f"Retrying with context reduced to {config.options['num_ctx']} tokens.")
+                        elif option:
+                            ui.write("Usage: /retry, /retry --short-context, or /retry --model NAME")
+                            continue
+                        original = tasks.resume("latest")
+                        agent.reset()
+                        interactive_run("Recover the saved task without repeating successful actions: " + original,
+                                        resume=True)
+                    except (AgentError, OllamaError, ToolError, OSError, ValueError) as exc:
+                        ui.write(f"Error: {exc}")
+                    continue
                 if prompt == "/resume" or prompt.startswith("/resume "):
                     try:
                         original = tasks.resume(prompt.split(maxsplit=1)[1] if " " in prompt else "latest")
@@ -564,6 +648,6 @@ def main(argv=None):
         except WorkspaceSwitch as switch:
             current = workspace_argv(current, switch.path)
         except ModelSwitch as switch:
-            current = model_argv(current, switch.model)
+            current = model_argv(current, switch.model, switch.resume)
         except ReloadSession:
             current = reload_argv(current)

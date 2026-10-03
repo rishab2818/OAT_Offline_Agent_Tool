@@ -66,6 +66,13 @@ continues saved work. Normal use does not require editing JSON or remembering ID
 | `/clear tasks` | Deletes old tasks, keeping the active task |
 | `/clear all` | Deletes old logs and tasks, keeping active records |
 | `/trace off` | Hides large model/tool trace blocks |
+| `/tokens` | Shows prompt, generated, cached, schema, system, and tool-result usage |
+| `/profiles` | Shows persisted Ollama capability profiles |
+| `/profiles test-all` | Tests every installed model that has not been profiled |
+| `/profiles refresh MODEL` | Re-tests one installed model |
+| `/retry` | Retries the latest incomplete task from durable state |
+| `/retry --short-context` | Halves context and retries saved work |
+| `/retry --model NAME` | Switches models and resumes the latest task |
 | `/exit` | Exits the program |
 
 `/workspace` changes the working folder, but it is not an operating-system
@@ -98,6 +105,46 @@ Long tasks checkpoint before approaching the token budget. Each ordinary prompt
 starts with clean conversational context so a previous failed task does not make
 the next one slower. `/resume` reconstructs work from the persisted plan and
 evidence.
+
+## Lightweight prompt architecture
+
+OAT minimizes repeated local inference work:
+
+- Only tools relevant to the current workflow action are sent to Ollama. Direct
+  requests use intent-based filtering with a safe fallback for ambiguous prompts.
+- The complete planning prompt is sent only while a PLAN workflow is being
+  compiled. Execution uses a short stable prompt plus routed instruction sections.
+- Full tool results remain in local evidence files. Ollama receives compact file,
+  command, and task-state results with explicit pagination when content is large.
+- Completed workflow actions checkpoint immediately. Long direct tasks compact
+  automatically as context pressure grows and recover older results by evidence ID.
+- `/tokens` exposes the actual token totals and the accumulated character cost of
+  tool schemas, system instructions, and tool results so improvements are measurable.
+
+## Automatic model profiles
+
+The first interactive use of an installed model runs a small capability probe and
+saves the result beside user preferences. Each model is tested once unless you
+explicitly refresh it. Profiles record native-tool reliability, JSON and thinking
+support, tested context, recommended context/timeout, generation speed, and probe
+errors. Selecting an untested model profiles it before switching. Use
+`/profiles test-all` to proactively test every installed model.
+
+Profiles let OAT avoid unsupported thinking, prefer JSON for unreliable native
+tools, and choose conservative local settings. Probes are deliberately short and
+are never run during a noninteractive one-shot command.
+
+## Progress and recovery
+
+Workflow progress reports completed/total actions, elapsed time, the current
+action, and an estimate range once enough completed work exists. Direct tasks show
+recorded action count and elapsed time without inventing a completion percentage.
+
+Failures are classified as context, transport, timeout, model availability,
+resource pressure, or server failure. One transient transport retry is automatic.
+Context overflow triggers one durable checkpoint retry. Unsupported thinking is
+disabled automatically. If recovery still needs user action, completed evidence
+is preserved for `/retry`, `/retry --short-context`, or `/retry --model NAME`.
 
 Python + Ollama + a local model. Type a task; the model reads files, calls tools,
 examines results and continues until it can answer. There is no hard-coded Ada,

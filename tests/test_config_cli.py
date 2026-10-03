@@ -76,6 +76,8 @@ Not a workflow step.
         self.assertEqual(model_argv(["--trace", "--model", "old", "--workspace", "x"], "new:7b"),
                          ["--trace", "--workspace", "x", "--model", "new:7b"])
         self.assertEqual(model_argv(["--model=old"], "new:7b"), ["--model", "new:7b"])
+        self.assertEqual(model_argv(["--model", "old"], "new:7b", resume=True),
+                         ["--model", "new:7b", "--resume", "latest"])
 
     def test_clear_saved_data_keeps_active_records(self):
         private = self.root / ".local-agent"

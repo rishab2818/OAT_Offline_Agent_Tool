@@ -1,6 +1,7 @@
+import json
 import unittest
 
-from local_agent.agent import Agent, AgentError
+from local_agent.agent import Agent, AgentError, compact_tool_result
 from local_agent.config import Config
 from local_agent.ollama import OllamaError
 from local_agent.registry import Registry, string
@@ -96,6 +97,31 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(agent.run("test"), "done")
         self.assertIsNone(agent.config.think)
         self.assertEqual(len(self.client.requests), 2)
+
+    def test_compact_read_result_preserves_evidence_and_paginates_transport(self):
+        result = {"ok": True, "evidence_id": "E000001", "result": {
+            "path": "large.txt", "offset": 0, "content": "x" * 50, "truncated": False}}
+        compact = json.loads(compact_tool_result("read_file", result, content_limit=10))
+        self.assertEqual(compact["evidence_id"], "E000001")
+        self.assertEqual(len(compact["result"]["content"]), 10)
+        self.assertTrue(compact["result"]["transport_truncated"])
+        self.assertEqual(compact["result"]["next_offset"], 10)
+
+    def test_transient_transport_failure_retries_once(self):
+        agent = self.agent([OllamaError("Remote end closed connection without response"),
+                            {"content": "done"}])
+        self.assertEqual(agent.run("test"), "done")
+        self.assertEqual(len(self.client.requests), 2)
+
+    def test_token_telemetry_tracks_prompt_generation_and_cache(self):
+        agent = self.agent([{"message": {"content": "done"}, "prompt_eval_count": 120,
+                             "prompt_eval_cached_count": 80, "eval_count": 12}])
+        agent.run("test")
+        usage = agent.token_usage()
+        self.assertEqual(usage["prompt_tokens"], 120)
+        self.assertEqual(usage["cached_prompt_tokens"], 80)
+        self.assertEqual(usage["generated_tokens"], 12)
+        self.assertGreater(usage["schema_characters"], 0)
 
     def test_explicit_native_mode_repairs_without_switching_modes(self):
         agent = self.agent([OllamaError("error parsing tool call: invalid character"),

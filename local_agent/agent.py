@@ -7,6 +7,7 @@ from .protocol import ProtocolError, parse_message, decode
 from .workspace import ToolError
 from .trace import display_trace
 from .tasks import CONTROL_TOOLS
+from .instruction_router import InstructionRouter
 
 
 PROTOCOL = """
@@ -33,6 +34,12 @@ Use one tool call per reply. Follow the supplied schema exactly; never add
 status/evidence fields to a plan, or fill output content with placeholder text.
 """
 
+EXECUTION_PROTOCOL = """You are executing one host-tracked local task action.
+Use only the supplied tools and routed instructions. Call one tool, inspect its
+result, and continue. Never claim a file or command action without tool evidence.
+Return a concise final answer only after the request is actually complete.
+"""
+
 class AgentError(RuntimeError):
     pass
 
@@ -51,15 +58,103 @@ def json_history(messages):
     return converted
 
 
+def compact_tool_result(name, result, content_limit=12000, output_limit=8000):
+    """Keep full evidence on disk while sending only action-relevant data back."""
+    if not result.get("ok"):
+        return json.dumps({"ok": False, "error": result.get("error", "Tool failed")}, ensure_ascii=False)
+    evidence = result.get("evidence_id")
+    value = result.get("result")
+    if name == "task_evidence" and isinstance(value, dict) and value.get("tool") and value.get("result"):
+        nested = dict(value["result"])
+        nested.setdefault("evidence_id", value.get("id"))
+        return compact_tool_result(value["tool"], nested, content_limit, output_limit)
+    if not isinstance(value, dict):
+        payload = {"result": value}
+    elif name == "read_file":
+        content = str(value.get("content", ""))
+        visible = content[:content_limit]
+        payload = {key: value.get(key) for key in ("path", "offset", "next_offset", "truncated") if key in value}
+        payload["content"] = visible
+        if len(content) > len(visible):
+            payload.update(transport_truncated=True,
+                           next_offset=(value.get("offset", 0) or 0) + len(visible))
+    elif name == "run_command":
+        payload = {key: value.get(key) for key in ("exit_code", "timed_out", "cwd") if key in value}
+        payload["stdout"] = str(value.get("stdout", ""))[:output_limit]
+        payload["stderr"] = str(value.get("stderr", ""))[:output_limit]
+    elif name in {"write_file", "edit_file"}:
+        payload = {key: value.get(key) for key in ("path", "characters", "replacements") if key in value}
+    elif name in {"plan_task", "expand_task", "complete_task_step", "task_status"}:
+        current = value.get("current") if isinstance(value, dict) else None
+        payload = {"status": value.get("status"), "current": current,
+                   "remaining_count": value.get("remaining_count"),
+                   "completed": value.get("completed", [])[-5:]}
+    elif name in {"list_files", "find_files", "search_text"}:
+        payload = dict(value)
+        for key in ("paths", "entries", "matches"):
+            if isinstance(payload.get(key), list) and len(payload[key]) > 100:
+                payload[key] = payload[key][:100]
+                payload["transport_truncated"] = True
+    else:
+        payload = value
+    envelope = {"ok": True, "result": payload}
+    if evidence:
+        envelope["evidence_id"] = evidence
+    return json.dumps(envelope, ensure_ascii=False)
+
+
+def classify_ollama_failure(reason):
+    reason = str(reason).lower()
+    if "out of memory" in reason or "cuda" in reason and "memory" in reason:
+        return "resource: reduce context or use a smaller model"
+    if "model not found" in reason:
+        return "model: select an installed model with /models"
+    if "timed out" in reason:
+        return "timeout: saved work is resumable with /retry or /retry --short-context"
+    if "cannot reach ollama" in reason or "connection refused" in reason:
+        return "availability: start Ollama, then use /retry"
+    if "context" in reason and ("length" in reason or "window" in reason):
+        return "context: durable state was preserved; retry with a smaller context"
+    return "server: inspect /logs; saved work remains resumable"
+
+
 class Agent:
-    def __init__(self, client, registry, config, system_prompt, log, emit=print, tasks=None):
+    def __init__(self, client, registry, config, system_prompt, log, emit=print, tasks=None,
+                 instruction_documents=None, workspace=None):
         self.client, self.registry, self.config = client, registry, config
         self.log, self.emit = log, emit
         self.tasks = tasks
         self.system_prompt = system_prompt + "\n" + PROTOCOL
+        self.router = InstructionRouter(instruction_documents, workspace)
         self.mode = "json" if config.tool_mode == "json" else "native"
         self.history = []
         self.cancelled = threading.Event()
+        self.usage = {"prompt_tokens": 0, "generated_tokens": 0, "cached_prompt_tokens": 0,
+                      "requests": 0, "schema_characters": 0, "system_characters": 0,
+                      "tool_result_characters": 0, "checkpoints": 0}
+
+    def _current_system(self):
+        if not self.tasks or not self.tasks.state:
+            return self.system_prompt
+        if not self.tasks.state.get("direct") and not self.tasks.state.get("steps"):
+            return self.system_prompt
+        routed = self.router.for_action(self.tasks.current(), self.tasks.state.get("direct", False))
+        return EXECUTION_PROTOCOL + ("\n\n" + routed if routed else "") + "\n" + PROTOCOL
+
+    def token_usage(self):
+        context = self.config.options.get("num_ctx")
+        last = self.usage.get("last_prompt_tokens", 0)
+        return {**self.usage, "context_tokens": context,
+                "estimated_context_remaining": max(0, context - last) if context else None}
+
+    def _checkpoint_messages(self, prompt):
+        self.usage["checkpoints"] += 1
+        return [{"role": "system", "content": self._current_system()},
+                {"role": "user", "content": prompt},
+                {"role": "user", "content":
+                 "Continue from durable task state. Do not repeat successful actions. "
+                 "Retrieve old details with task_evidence only when needed. State: "
+                 + json.dumps(self.tasks.status(), ensure_ascii=False)}]
 
     def reset(self):
         self.history.clear()
@@ -86,7 +181,7 @@ class Agent:
     def _run(self, prompt, resume=False):
         if self.tasks and not resume:
             self.tasks.begin(prompt)
-        system = self.system_prompt
+        system = self._current_system()
         base = [{"role": "system", "content": system}, *self.history,
                 {"role": "user", "content": prompt}]
         messages = list(base)
@@ -104,6 +199,8 @@ class Agent:
         revision = self.tasks.state["revision"] if self.tasks else 0
         checkpoint_revision = -1
         last_prompt_tokens = 0
+        transport_retries = 0
+        context_repairs = 0
         self.log.write("request", prompt=prompt, model=self.config.model, mode=self.mode)
         for step in range(1, self.config.max_steps + 1):
             if self.cancelled.is_set():
@@ -113,19 +210,16 @@ class Agent:
                     raise AgentError("Task incomplete: " + self.tasks.state["reason"])
                 if stalled >= self.config.max_stalled_steps:
                     raise AgentError("No plan progress within max_stalled_steps. Task saved incomplete; inspect /plan before resuming.")
+            messages[0]["content"] = self._current_system()
+            system = messages[0]["content"]
             size = len(json.dumps(messages, ensure_ascii=False))
             context_limit = self.config.options.get("num_ctx", 0)
             output_reserve = self.config.options.get("num_predict", 0) + 1024
-            token_pressure = (context_limit and last_prompt_tokens >= max(1, context_limit - output_reserve) * 0.65)
-            if (self.tasks and (size > self.config.max_context_chars * 0.65 or token_pressure)
+            token_pressure = (context_limit and last_prompt_tokens >= max(1, context_limit - output_reserve) * 0.50)
+            if (self.tasks and (size > self.config.max_context_chars * 0.50 or token_pressure)
                     and checkpoint_revision != self.tasks.state["revision"]):
                 checkpoint_revision = self.tasks.state["revision"]
-                messages = [{"role": "system", "content": system},
-                            {"role": "user", "content": prompt},
-                            {"role": "user", "content":
-                             "Conversation checkpoint. Continue the saved task, not a new plan. "
-                             "Use task_evidence to retrieve actual previous outputs if needed. "
-                             "Do not repeat successful actions. Runtime task state: " + json.dumps(self.tasks.status())}]
+                messages = self._checkpoint_messages(prompt)
                 self.log.write("checkpoint", revision=checkpoint_revision)
                 self.emit("[task] Context checkpoint saved; continuing from the persisted plan and evidence.")
             if len(json.dumps(messages, ensure_ascii=False)) > self.config.max_context_chars:
@@ -133,13 +227,12 @@ class Agent:
                                  "or use /reset and split the task; no evidence was silently truncated.")
             self.emit(f"[model] step {step}, mode={self.mode}")
             schemas = self.registry.schemas()
-            if self.tasks and self.tasks.state.get("direct"):
-                hidden = {"plan_task", "expand_task", "complete_task_step", "task_status"}
-                schemas = [s for s in schemas if s["function"]["name"] not in hidden]
-            elif self.tasks and self.tasks.state["steps"]:
-                # The immutable plan is already saved. Its large nested input
-                # schema is no longer needed on every inference request.
-                schemas = [s for s in schemas if s["function"]["name"] != "plan_task"]
+            if self.tasks:
+                allowed = self.tasks.allowed_tools()
+                schemas = [schema for schema in schemas if schema["function"]["name"] in allowed]
+            self.usage["requests"] += 1
+            self.usage["schema_characters"] += len(json.dumps(schemas, separators=(",", ":")))
+            self.usage["system_characters"] += len(messages[0]["content"])
             try:
                 api_messages = messages
                 if self.mode == "json":
@@ -155,6 +248,20 @@ class Agent:
                     self.log.write("capability_adjustment", capability="thinking", enabled=False,
                                    model=self.config.model, reason=str(exc))
                     self.emit("[protocol] This model does not support thinking; retrying without it.")
+                    continue
+                context_failure = any(term in reason for term in ("context length", "context window", "too many tokens"))
+                if self.tasks and context_failure and context_repairs < 1:
+                    context_repairs += 1
+                    messages = self._checkpoint_messages(prompt)
+                    self.log.write("recovery", category="context", action="checkpoint", error=str(exc))
+                    self.emit("[recovery] Context limit reached; compacted durable state and retrying once.")
+                    continue
+                transient = any(term in reason for term in
+                                ("timed out", "connection reset", "closed connection", "http 502", "http 503"))
+                if transient and transport_retries < 1:
+                    transport_retries += 1
+                    self.log.write("recovery", category="transport", action="retry", error=str(exc))
+                    self.emit("[recovery] Temporary Ollama transport failure; retrying once with saved state intact.")
                     continue
                 unsupported_tools = ("tool" in reason and any(x in reason for x in
                                      ("not support", "unsupported")))
@@ -179,9 +286,17 @@ class Agent:
                                      "Use kind=foreach with steps; use {item} in templates. "
                                      "Do not include generated document content in plan checks."})
                     continue
+                category = classify_ollama_failure(exc)
+                self.log.write("failure", category=category, error=str(exc), resumable=bool(self.tasks))
+                self.emit("[recovery] " + category)
                 raise
             self.log.write("response", step=step, response=response)
             last_prompt_tokens = response.get("prompt_eval_count", last_prompt_tokens)
+            self.usage["prompt_tokens"] += response.get("prompt_eval_count", 0) or 0
+            self.usage["cached_prompt_tokens"] += response.get("prompt_eval_cached_count", 0) or 0
+            self.usage["generated_tokens"] += response.get("eval_count", 0) or 0
+            self.usage["last_prompt_tokens"] = last_prompt_tokens
+            transport_retries = 0
             message = response["message"]
             if response.get("done_reason") == "length":
                 raise AgentError("Model hit num_predict before completing its reply. Increase num_predict; "
@@ -244,6 +359,7 @@ class Agent:
             messages.append(assistant)
             batch_failed = False
             execution_progress = False
+            compact_after_action = False
             for call in calls:
                 if self.cancelled.is_set():
                     raise AgentError("Paused by user. Completed steps and evidence were saved.")
@@ -264,8 +380,9 @@ class Agent:
                 self.log.write("tool", name=call.name, arguments=call.arguments, result=result)
                 if self.config.trace:
                     display_trace(self.emit, "TOOL RESULT -> MODEL", {"name": call.name, **result})
-                messages.append({"role": "tool", "tool_name": call.name,
-                                 "content": json.dumps(result, ensure_ascii=False)})
+                compact_result = compact_tool_result(call.name, result)
+                self.usage["tool_result_characters"] += len(compact_result)
+                messages.append({"role": "tool", "tool_name": call.name, "content": compact_result})
                 if not result["ok"]:
                     batch_failed = True
                     self.emit(f"[tool error] {result['error']}")
@@ -273,6 +390,8 @@ class Agent:
                     self.emit(f"[saved] {result['result']['path']}")
                 if result["ok"] and call.name not in CONTROL_TOOLS:
                     execution_progress = True
+                if result["ok"] and call.name in {"plan_task", "complete_task_step", "expand_task"}:
+                    compact_after_action = True
             self.history = messages[1:]
             if self.tasks:
                 if revision != self.tasks.state["revision"]:
@@ -287,6 +406,13 @@ class Agent:
                     stalled += 1
                 # Plan-control results already contain the updated runtime
                 # state. Repeating it after every tool rapidly fills context.
+                progress = self.tasks.progress()
+                if progress:
+                    self.emit("[progress] " + json.dumps(progress, ensure_ascii=False))
+                if compact_after_action:
+                    messages = self._checkpoint_messages(prompt)
+                    checkpoint_revision = self.tasks.state["revision"]
+                    self.log.write("checkpoint", revision=checkpoint_revision, reason="action_complete")
             failures = failures + 1 if batch_failed else 0
             if failures > self.config.max_repairs:
                 raise AgentError("Repeated tool errors; see the run log before retrying the task.")

@@ -30,15 +30,41 @@ class TerminalUI:
             return
         if value.startswith("[model]"):
             return
+        if value.startswith("[progress] "):
+            try:
+                progress = json.loads(value[len("[progress] "):])
+                elapsed = self._duration(progress.get("elapsed_seconds", 0))
+                if progress.get("total"):
+                    line = f"  progress {progress['done']}/{progress['total']} | elapsed {elapsed}"
+                else:
+                    line = f"  actions {progress.get('actions_recorded', 0)} | elapsed {elapsed}"
+                if progress.get("current"):
+                    line += " | " + progress["current"]
+                estimate = progress.get("estimate")
+                if estimate:
+                    line += (f" | remaining ~{self._duration(estimate['low_seconds'])}"
+                             f"-{self._duration(estimate['high_seconds'])}")
+                self.write(line)
+                return
+            except (ValueError, TypeError, KeyError):
+                pass
         mappings = {
             "[tool] ": "  -> ", "[saved] ": "  + saved ", "[tool error] ": "  ! ",
             "[protocol] ": "  i ", "[task] ": "  i ", "[plan] ": "  task record: ",
+            "[recovery] ": "  ! recovery: ",
         }
         for prefix, replacement in mappings.items():
             if value.startswith(prefix):
                 self.write(replacement + value[len(prefix):])
                 return
         self.write(value)
+
+    @staticmethod
+    def _duration(seconds):
+        seconds = max(0, int(seconds or 0))
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes}m" if hours else (f"{minutes}m {seconds}s" if minutes else f"{seconds}s")
 
     def task_start(self, prompt):
         summary = " ".join(prompt.split())

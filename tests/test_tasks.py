@@ -404,3 +404,23 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(Path(review["files"][0]["path"]).name, "report.txt")
         self.assertEqual(manager.delete_history("latest"), entry["task_id"])
         self.assertNotIn(entry["task_id"], {item["task_id"] for item in manager.history()})
+
+    def test_action_scoped_tools_exclude_unneeded_command_and_write_tools(self):
+        self.manager.plan_task([action("read", [tool("read_file", path="input.txt")])])
+        allowed = self.manager.allowed_tools()
+        self.assertIn("read_file", allowed)
+        self.assertIn("complete_task_step", allowed)
+        self.assertNotIn("write_file", allowed)
+        self.assertNotIn("run_command", allowed)
+
+    def test_completed_plan_action_compacts_full_system_prompt(self):
+        replies = [call("plan_task", steps=[action("answer", [{"type": "answer"}])]),
+                   call("complete_task_step", step_id="answer", evidence_ids=[], summary="answered"),
+                   {"content": "done"}]
+        client = FakeClient(replies)
+        agent = Agent(client, self.registry, self.config, "LONG SYSTEM " * 1000,
+                      Log(), emit=lambda _: None, tasks=self.manager)
+        self.assertEqual(agent.run("answer"), "done")
+        self.assertGreater(len(client.requests[0][0]["content"]),
+                           len(client.requests[1][0]["content"]) * 2)
+        self.assertGreater(agent.token_usage()["checkpoints"], 0)
