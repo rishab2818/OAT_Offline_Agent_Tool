@@ -16,9 +16,14 @@ ollama list
 ### 2. Start the agent
 
 ```powershell
-cd D:\LLR_Gen_Full_Tool\code\code\complete_project
+cd D:\LLR_Gen_Full_Tool\code\code
 python main.py --workspace "D:\testing_llr\code" --instructions PLAN.md --instructions SKILL.md
 ```
+
+On the first interactive launch, OAT asks you to choose an installed Ollama
+model, default workspace, context size, timeout, and compact/detailed interface.
+Preferences are stored outside the repository in `%LOCALAPPDATA%\OAT\settings.json`
+on Windows. Run `python main.py --setup` or enter `/setup` to change them later.
 
 ### 3. Enter a request
 
@@ -34,7 +39,11 @@ continues saved work. Normal use does not require editing JSON or remembering ID
 | Command | What it does |
 | --- | --- |
 | `/help` | Shows available commands |
+| `/menu` | Shows the compact interactive command menu |
 | `/settings` | Shows model, workspace, context and timeout |
+| `/setup` | Reruns the setup wizard and saves new defaults |
+| `/ui compact` | Shows concise task progress without model-step noise |
+| `/ui detailed` | Shows detailed runtime events |
 | `/models` | Lists every model installed in local Ollama and marks the current one |
 | `/model NUMBER` | Switches to a model by its `/models` number |
 | `/model NAME` | Switches to an installed model by its exact tag |
@@ -43,7 +52,13 @@ continues saved work. Normal use does not require editing JSON or remembering ID
 | `/plan` | Shows the active saved task |
 | `/stop` | Pauses active work safely |
 | `/history` | Lists earlier requests |
-| `/history WORDS` | Searches earlier requests |
+| `/history completed` | Filters history by completion status |
+| `/history failed` | Shows blocked or incomplete work |
+| `/history search WORDS` | Searches original requests |
+| `/history show 2` | Shows complete metadata for history item 2 |
+| `/history artifacts 2` | Shows files and commands recorded for item 2 |
+| `/history delete 2` | Deletes a saved task record |
+| `/review 2` | Reviews files, hashes, verification, and commands for item 2 |
 | `/resume 1` | Continues history item 1 |
 | `/rerun 1` | Runs history item 1 again from the beginning |
 | `/workspace D:\project` | Switches to another existing folder |
@@ -97,7 +112,7 @@ cloud API keys, automatic model downloads, or external agent framework.
 Requires Python 3.11+ and a running Ollama server with the model installed.
 
 ```powershell
-cd D:\LLR_Gen_Full_Tool\code\code\complete_project
+cd D:\LLR_Gen_Full_Tool\code\code
 python main.py --doctor
 python main.py
 ```
@@ -121,8 +136,8 @@ Read PLAN.md and SKILL.md and carry out the workflow they describe.
 ```
 
 The workspace defaults to the directory you launch the CLI from (`workspace: null`
-in config.json). Launching from `complete_project` therefore resolves `README.md`
-to `complete_project/README.md`. Use `--workspace D:\AnotherProject` to choose a
+in config.json). Launching from the repository root therefore resolves `README.md`
+to the root `README.md`. Use `--workspace D:\AnotherProject` to choose a
 different base explicitly; a non-null workspace in a custom config also overrides
 the launch-directory default.
 
@@ -215,10 +230,12 @@ Planning controls are hidden from the model in direct mode.
 - Longer conversations checkpoint to persisted state; earlier tool results remain
   retrievable by evidence ID. This is structured task memory, not private reasoning.
 
-Use `/plan` to inspect progress. `/history` lists prior requests newest-first with
-a number and full task ID, so forgotten work can be rediscovered. `/history 2`
-shows that entry's complete original prompt, status, timestamp, and saved plan;
-`/history revision report` filters requests containing those words. `/resume 2`
+Use `/status` to inspect progress. `/history` lists prior requests newest-first with
+a number, model, artifact count, and full task ID, so forgotten work can be
+rediscovered. `/history show 2` shows that entry's complete original prompt,
+status, timestamp, and saved plan; `/history search revision report` filters
+requests containing those words. `/review 2` reconstructs its files, verification
+hashes, and command exit codes from durable evidence. `/resume 2`
 (or `/resume TASK_ID`) continues that task
 without repeating completed steps. `/rerun 2` starts its original request again
 as a new task with a fresh plan and evidence, which is appropriate for completed

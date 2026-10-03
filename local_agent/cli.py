@@ -14,12 +14,14 @@ from .config import Config
 from .command_tools import register_command_tools
 from .file_tools import register_file_tools
 from .ollama import OllamaClient, OllamaError
+from .preferences import load_preferences, setup_wizard
 from .registry import Registry
 from .storage import RunLog, private_directory, workspace_lock
 from .workspace import Workspace, ToolError
 from .trace import display_trace
 from .tasks import TaskManager, CONTROL_TOOLS
 from .workflow_contract import workflow_contract
+from .ui import TerminalUI
 from . import __version__
 
 
@@ -34,6 +36,10 @@ class WorkspaceSwitch(Exception):
 class ModelSwitch(Exception):
     def __init__(self, model):
         self.model = model
+
+
+class ReloadSession(Exception):
+    pass
 
 
 def configure_console_output():
@@ -75,6 +81,10 @@ def model_argv(argv, model):
             continue
         result.append(value)
     return [*result, "--model", model]
+
+
+def reload_argv(argv):
+    return [value for value in argv if value != "--setup"]
 
 
 def clear_saved_data(directory, scope, current_log=None, current_task=None):
@@ -122,6 +132,8 @@ def parser():
     result.add_argument("--max-steps", type=int)
     result.add_argument("--timeout-seconds", type=int)
     result.add_argument("--doctor", action="store_true", help="Check configuration, workspace and local model; do not run analysis")
+    result.add_argument("--setup", action="store_true", help="Run the first-run setup wizard")
+    result.add_argument("--ui-mode", choices=("compact", "detailed"), help="Terminal interface verbosity")
     return result
 
 
@@ -160,8 +172,8 @@ def load_instructions(config, workspace):
 
 
 @contextmanager
-def heartbeat():
-    print("[working] Waiting for the local model/tool response... Ctrl+C stops safely.", flush=True)
+def heartbeat(output=print):
+    output("Waiting for the local model/tool response... Ctrl+C stops safely.")
     try:
         yield
     finally:
@@ -172,11 +184,20 @@ def _main(argv=None):
     configure_console_output()
     args = parser().parse_args(argv)
     try:
+        preferences = load_preferences()
         overrides = {key: getattr(args, key) for key in
                      ("model", "base_url", "tool_mode", "agent_file", "max_steps", "timeout_seconds", "trace")}
+        if not args.model and preferences.get("model"):
+            overrides["model"] = preferences["model"]
+        if not args.timeout_seconds and preferences.get("timeout_seconds"):
+            overrides["timeout_seconds"] = preferences["timeout_seconds"]
         if args.workspace:
             overrides["workspace"] = str(Path(args.workspace).resolve())
+        elif preferences.get("workspace"):
+            overrides["workspace"] = preferences["workspace"]
         config = Config.load(args.config, overrides)
+        if preferences.get("context_tokens"):
+            config.options["num_ctx"] = preferences["context_tokens"]
         if args.instructions:
             config.instruction_files.extend(args.instructions)
         if args.think is not None:
@@ -184,6 +205,12 @@ def _main(argv=None):
         workspace = Workspace(config.workspace, config.max_file_chars)
         instructions = load_instructions(config, workspace)
         client = OllamaClient(config.base_url, config.timeout_seconds)
+        first_run = (not preferences.get("setup_complete") and sys.stdin.isatty()
+                     and args.prompt is None and args.prompt_file is None and not args.resume and not args.doctor)
+        if args.setup or first_run:
+            setup_wizard(client, config)
+            raise ReloadSession()
+        ui = TerminalUI(args.ui_mode or preferences.get("ui_mode", "compact"))
         if args.doctor:
             models = client.models()
             available = config.model in models or config.model + ":latest" in models
@@ -200,29 +227,27 @@ def _main(argv=None):
                 if config.trace:
                     label = {"request": "REQUEST -> OLLAMA", "response": "RESPONSE <- OLLAMA",
                              "error": "OLLAMA ERROR"}[event]
-                    display_trace(lambda text: print(text, flush=True), label, data)
+                    display_trace(ui.write, label, data)
             client.trace = trace_traffic
             registry = Registry()
             register_file_tools(registry, workspace, config)
             register_command_tools(registry, workspace, config)
             requirements = workflow_contract(selected_instruction_documents(config, workspace))
             tasks = TaskManager(workspace, directory, config.enabled_tools, requirements,
-                                direct_mode=not requirements)
+                                direct_mode=not requirements,
+                                metadata={"model": config.model, "context_tokens": config.options.get("num_ctx"),
+                                          "tool_mode": config.tool_mode})
             tasks.register(registry)
             registry.select(list(config.enabled_tools) + sorted(CONTROL_TOOLS))
-            print(f"Runtime: local-agent {__version__}\nModel: {config.model}\nWorkspace: {workspace.root}\n"
-                  f"Context: {config.options.get('num_ctx', 'model default')} tokens\n"
-                  f"Model timeout: {config.timeout_seconds} seconds\n"
-                  f"Relative file paths resolve from this workspace.\n"
-                  f"Trace: {'on (full requests/responses)' if config.trace else 'off'}\nLog: {log.path}", flush=True)
+            ui.banner(__version__, config, log.path)
             log.write("session", runtime_version=__version__, config=vars(config), instructions=instructions)
-            agent = Agent(client, registry, config, instructions, log, tasks=tasks,
-                          emit=lambda value: print(value, flush=True))
+            agent = Agent(client, registry, config, instructions, log, tasks=tasks, emit=ui.emit)
             def run(prompt, resume=False):
                 if not prompt.strip():
                     raise ValueError("Prompt cannot be empty")
                 try:
-                    with heartbeat():
+                    ui.task_start(prompt)
+                    with heartbeat(ui.write):
                         answer = agent.run(prompt, resume=resume)
                 except KeyboardInterrupt:
                     tasks.block("Interrupted by user. Completed steps and tool evidence were saved.")
@@ -231,7 +256,7 @@ def _main(argv=None):
                     tasks.block(str(exc))
                     log.write("error", error=str(exc))
                     raise
-                print("\n" + answer, flush=True)
+                ui.task_complete(answer, tasks.review())
 
             def interactive_run(prompt, resume=False):
                 """Run work in the background so /stop remains available on Windows."""
@@ -246,7 +271,7 @@ def _main(argv=None):
                         outcome["error"] = exc
                 thread = threading.Thread(target=worker, daemon=True, name="agent-task")
                 thread.start()
-                print("[control] Type /stop then Enter to pause safely; completed work is resumable.", flush=True)
+                ui.write("Controls while working: /status  /artifacts  /stop")
                 line = ""
                 while thread.is_alive():
                     if not msvcrt.kbhit():
@@ -259,10 +284,12 @@ def _main(argv=None):
                         if command == "/stop":
                             print("[control] Pausing after the current atomic tool action...", flush=True)
                             agent.cancel()
-                        elif command == "/plan":
-                            print(json.dumps(tasks.status(), indent=2, ensure_ascii=False), flush=True)
+                        elif command in {"/plan", "/status"}:
+                            ui.show_json(tasks.status())
+                        elif command == "/artifacts":
+                            ui.show_json(tasks.review())
                         elif command:
-                            print("[control] While working, use /stop or /plan.", flush=True)
+                            ui.write("While working, use /status, /artifacts, or /stop.")
                     elif char == "\b":
                         if line:
                             line = line[:-1]
@@ -284,10 +311,10 @@ def _main(argv=None):
             if prompt is not None:
                 run(prompt)
                 return 0
-            print("Type a prompt, or /help for commands. Common: /plan, /stop, /history, /models, /workspace PATH.")
+            ui.write("Commands: /menu, /history, /review, /models, /workspace PATH, /help")
             while True:
                 try:
-                    prompt = input("\nYou> ").strip()
+                    prompt = ui.prompt(config.model, workspace.root)
                 except EOFError:
                     return 0
                 if not prompt:
@@ -301,17 +328,43 @@ def _main(argv=None):
                           "/workspace PATH = restart this session in another folder. "
                           "/models = list locally installed Ollama models. "
                           "/model NUMBER|NAME = switch to an installed model. "
+                          "/review [number|id] = show files and commands from a task. "
+                          "/artifacts [number|id] = show task artifacts. /ui compact|detailed = change display. "
                           "/settings = show active model limits. /clear logs|tasks|all = remove old records. "
                           "/context TOKENS and /timeout SECONDS change this session's model limits. "
                           "/trace on|off = toggle full terminal tracing. "
                           "/exit = quit. For multiline prompts use --prompt-file. "
                           "Conversation is kept within this session. Task behavior comes from your prompts/instructions.")
                     continue
-                if prompt == "/plan":
+                if prompt == "/menu":
+                    ui.write("""Available actions
+  Work       Type any request
+  Progress   /status or /plan
+  Results    /review, /artifacts
+  History    /history, /history failed, /history search WORDS
+  Continue   /resume NUMBER, /rerun NUMBER
+  Models     /models, /model NUMBER
+  Workspace  /workspace PATH
+  Display    /ui compact, /ui detailed
+  Setup      /setup
+  Exit       /exit""")
+                    continue
+                if prompt == "/setup":
+                    setup_wizard(client, config)
+                    raise ReloadSession()
+                if prompt in {"/ui compact", "/ui detailed"}:
+                    ui.mode = prompt.split()[1]
+                    ui.write(f"Interface mode changed to {ui.mode} for this session.")
+                    continue
+                if prompt == "/logs":
+                    ui.write(str(log.path))
+                    continue
+                if prompt in {"/plan", "/status"}:
                     print(json.dumps(tasks.status(), indent=2, ensure_ascii=False))
                     continue
                 if prompt == "/settings":
                     print(json.dumps({"model": config.model, "workspace": str(workspace.root),
+                                      "ui_mode": ui.mode,
                                       "context_tokens": config.options.get("num_ctx"),
                                       "max_output_tokens": config.options.get("num_predict"),
                                       "model_timeout_seconds": config.timeout_seconds,
@@ -395,34 +448,70 @@ def _main(argv=None):
                     continue
                 if prompt == "/history" or prompt.startswith("/history "):
                     entries = tasks.history()
-                    selector = prompt.split(maxsplit=1)[1].strip() if " " in prompt else ""
-                    if selector.isdigit() and entries:
+                    query = prompt.split(maxsplit=1)[1].strip() if " " in prompt else ""
+                    parts = query.split(maxsplit=1)
+                    action = parts[0].lower() if parts else ""
+                    value = parts[1].strip() if len(parts) > 1 else ""
+                    if action in {"show", "artifacts"} or query.isdigit():
+                        selector = value if action in {"show", "artifacts"} else query
+                        if action == "artifacts":
+                            try:
+                                ui.show_json(tasks.review(selector or "latest"))
+                            except ToolError as exc:
+                                ui.write(f"Error: {exc}")
+                            continue
+                        if not selector.isdigit():
+                            try:
+                                ui.show_json(tasks.review(selector))
+                            except ToolError as exc:
+                                ui.write(f"Error: {exc}")
+                            continue
                         number = int(selector)
                         if number < 1 or number > len(entries):
                             print(f"History number must be between 1 and {len(entries)}.")
                             continue
                         entry = entries[number - 1]
-                        print(json.dumps({
+                        detail = {
                             "number": entry["number"], "task_id": entry["task_id"],
                             "status": entry["status"], "remaining_count": entry["remaining_count"],
                             "updated": datetime.fromtimestamp(entry["updated"]).astimezone().isoformat(timespec="seconds"),
+                            "model": entry.get("model"), "artifact_count": entry.get("artifact_count", 0),
                             "request": entry["request"],
                             "plan_file": str(tasks.directory / entry["task_id"] / "plan.md"),
-                        }, indent=2, ensure_ascii=False))
+                        }
+                        ui.show_json(detail)
                         continue
-                    if selector:
-                        words = selector.casefold().split()
+                    if action == "delete":
+                        if not value:
+                            ui.write("Usage: /history delete NUMBER|ID")
+                            continue
+                        try:
+                            deleted = tasks.delete_history(value)
+                            ui.write(f"Deleted saved task {deleted}. This cannot be resumed.")
+                        except ToolError as exc:
+                            ui.write(f"Error: {exc}")
+                        continue
+                    if action in {"complete", "completed", "blocked", "active", "planning"}:
+                        wanted = "complete" if action == "completed" else action
+                        entries = [entry for entry in entries if entry["status"] == wanted]
+                    elif action == "failed":
+                        entries = [entry for entry in entries if entry["status"] in {"blocked", "incomplete"}]
+                    elif action == "search":
+                        words = value.casefold().split()
                         entries = [entry for entry in entries
                                    if all(word in entry["request"].casefold() for word in words)]
-                    if not entries:
-                        print("No matching saved tasks in this workspace.")
-                    else:
-                        for entry in entries:
-                            request = " ".join(entry["request"].split())
-                            if len(request) > 180:
-                                request = request[:177] + "..."
-                            print(f"{entry['number']:>3}. [{entry['status']}] {entry['task_id']} "
-                                  f"remaining={entry['remaining_count']}\n     {request}")
+                    elif query:
+                        words = query.casefold().split()
+                        entries = [entry for entry in entries
+                                   if all(word in entry["request"].casefold() for word in words)]
+                    ui.history(entries)
+                    continue
+                if prompt == "/review" or prompt.startswith("/review ") or prompt == "/artifacts" or prompt.startswith("/artifacts "):
+                    selector = prompt.split(maxsplit=1)[1].strip() if " " in prompt else None
+                    try:
+                        ui.show_json(tasks.review(selector))
+                    except ToolError as exc:
+                        ui.write(f"Error: {exc}")
                     continue
                 if prompt == "/resume" or prompt.startswith("/resume "):
                     try:
@@ -476,3 +565,5 @@ def main(argv=None):
             current = workspace_argv(current, switch.path)
         except ModelSwitch as switch:
             current = model_argv(current, switch.model)
+        except ReloadSession:
+            current = reload_argv(current)

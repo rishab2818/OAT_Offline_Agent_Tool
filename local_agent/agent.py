@@ -150,6 +150,12 @@ class Agent:
                                             schemas, self.config, self.mode)
             except OllamaError as exc:
                 reason = str(exc).lower()
+                if self.config.think is not None and "does not support thinking" in reason:
+                    self.config.think = None
+                    self.log.write("capability_adjustment", capability="thinking", enabled=False,
+                                   model=self.config.model, reason=str(exc))
+                    self.emit("[protocol] This model does not support thinking; retrying without it.")
+                    continue
                 unsupported_tools = ("tool" in reason and any(x in reason for x in
                                      ("not support", "unsupported")))
                 if self.config.tool_mode == "auto" and self.mode == "native" and unsupported_tools:

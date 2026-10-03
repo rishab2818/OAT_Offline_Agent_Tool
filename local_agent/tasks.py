@@ -4,6 +4,7 @@ The model proposes the plan; the host owns status, evidence IDs, and transitions
 No source language, queue filename, or output format is assumed here.
 """
 import copy
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
@@ -29,13 +30,14 @@ def file_digest(path):
 
 
 class TaskManager:
-    def __init__(self, workspace, directory, enabled_tools, requirements=None, direct_mode=False):
+    def __init__(self, workspace, directory, enabled_tools, requirements=None, direct_mode=False, metadata=None):
         self.ws = workspace
         self.directory = private_path(directory, "tasks")
         self.directory.mkdir(exist_ok=True)
         self.enabled_tools = set(enabled_tools)
         self.requirements = list(requirements or [])
         self.direct_mode = bool(direct_mode)
+        self.metadata = dict(metadata or {})
         self.state = None
         self.folder = None
 
@@ -50,7 +52,8 @@ class TaskManager:
                  if direct else [])
         self.state = {"version": 1, "id": task_id, "workspace": str(self.ws.root),
                       "request": prompt, "status": "active" if direct else "planning", "steps": steps, "direct": direct,
-                      "next_event": 1,
+                      "next_event": 1, "created_at": datetime.now(timezone.utc).isoformat(),
+                      "metadata": copy.deepcopy(self.metadata),
                       "revision": 0, "inflight": None, "reason": "",
                       "requirements": copy.deepcopy(self.requirements)}
         self._save()
@@ -69,6 +72,9 @@ class TaskManager:
                                 "status": state.get("status", "unknown"),
                                 "request": state.get("request", ""),
                                 "updated": path.stat().st_mtime,
+                                "created_at": state.get("created_at"),
+                                "model": state.get("metadata", {}).get("model"),
+                                "artifact_count": len(self._artifacts_for(state, path.parent)["files"]),
                                 "remaining_count": sum(s.get("status") != "done"
                                                        for s in self._walk_state(state.get("steps", [])))})
             except (OSError, ValueError, TypeError):
@@ -166,6 +172,7 @@ class TaskManager:
         return recovered
 
     def _save(self):
+        self.state["updated_at"] = datetime.now(timezone.utc).isoformat()
         atomic_write(private_path(self.folder, "plan.json"), json.dumps(self.state, indent=2, ensure_ascii=False) + "\n")
         rows = [f"# Task {self.state['id']}", "", self.state["request"], "", f"Status: {self.state['status']}", ""]
         def render(steps, indent=""):
@@ -181,6 +188,60 @@ class TaskManager:
         if self.state["reason"]:
             rows += ["", "Incomplete: " + self.state["reason"]]
         atomic_write(private_path(self.folder, "plan.md"), "\n".join(rows) + "\n")
+
+    def _artifacts_for(self, state, folder):
+        files, commands = {}, []
+        evidence_folder = folder / "evidence"
+        for number in range(1, state.get("next_event", 1)):
+            path = evidence_folder / f"E{number:06d}.json"
+            try:
+                event = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            result = event.get("result", {})
+            if not result.get("ok"):
+                continue
+            tool = event.get("tool")
+            if event.get("file"):
+                file_path = event["file"]["path"]
+                existing = files.get(file_path)
+                operation = (existing.get("operation") if existing and tool == "read_file" else tool)
+                files[file_path] = {"path": file_path, "operation": operation,
+                                    "verified": tool == "read_file" or bool(existing and existing.get("verified")),
+                                    "exists": Path(file_path).is_file(),
+                                    "size_bytes": Path(file_path).stat().st_size if Path(file_path).is_file() else None,
+                                    "sha256": event["file"].get("sha256"), "evidence_id": event.get("id")}
+            if tool == "run_command":
+                data = result.get("result", {})
+                commands.append({"command": event.get("arguments", {}).get("command", ""),
+                                 "cwd": event.get("arguments", {}).get("cwd"),
+                                 "shell": event.get("arguments", {}).get("shell"),
+                                 "exit_code": data.get("exit_code"), "timed_out": data.get("timed_out", False),
+                                 "stdout": str(data.get("stdout", ""))[:1000],
+                                 "stderr": str(data.get("stderr", ""))[:1000],
+                                 "evidence_id": event.get("id")})
+        return {"files": list(files.values()), "commands": commands}
+
+    def review(self, selector=None):
+        if selector is None and self.state:
+            state, folder = self.state, self.folder
+        else:
+            task_id = self._resolve_history_selector(selector or "latest")
+            folder = private_path(self.directory, task_id)
+            state = json.loads(private_path(folder, "plan.json").read_text(encoding="utf-8"))
+        artifacts = self._artifacts_for(state, folder)
+        return {"task_id": state.get("id"), "status": state.get("status"),
+                "request": state.get("request", ""), "model": state.get("metadata", {}).get("model"),
+                "created_at": state.get("created_at"), "updated_at": state.get("updated_at"), **artifacts}
+
+    def delete_history(self, selector):
+        task_id = self._resolve_history_selector(selector)
+        folder = private_path(self.directory, task_id)
+        if self.folder and folder.resolve() == self.folder.resolve() and self.state and self.state.get("status") != "complete":
+            raise ToolError("Cannot delete the active unfinished task")
+        import shutil
+        shutil.rmtree(folder)
+        return task_id
 
     def _all(self, steps=None):
         for step in self.state["steps"] if steps is None else steps:

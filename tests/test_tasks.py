@@ -385,3 +385,22 @@ class TaskTests(unittest.TestCase):
         names = {schema["function"]["name"] for schema in client.schemas[0]}
         self.assertNotIn("plan_task", names)
         self.assertNotIn("complete_task_step", names)
+
+    def test_history_review_records_model_and_artifacts(self):
+        registry = Registry()
+        register_file_tools(registry, self.ws, self.config)
+        manager = TaskManager(self.ws, self.directory, self.config.enabled_tools, direct_mode=True,
+                              metadata={"model": "coder:7b"})
+        manager.register(registry)
+        manager.begin("create report")
+        request = Call("write_file", {"path": "report.txt", "content": "done"})
+        event, _ = manager.before_tool(request)
+        manager.after_tool(event, registry.execute(request))
+        self.assertIsNone(manager.finalize())
+        entry = manager.history()[0]
+        self.assertEqual(entry["model"], "coder:7b")
+        self.assertEqual(entry["artifact_count"], 1)
+        review = manager.review("latest")
+        self.assertEqual(Path(review["files"][0]["path"]).name, "report.txt")
+        self.assertEqual(manager.delete_history("latest"), entry["task_id"])
+        self.assertNotIn(entry["task_id"], {item["task_id"] for item in manager.history()})

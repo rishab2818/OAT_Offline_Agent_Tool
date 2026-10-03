@@ -90,6 +90,13 @@ class AgentTests(unittest.TestCase):
             agent.run("save")
         self.assertEqual(len(self.client.requests), 1)
 
+    def test_unsupported_thinking_is_disabled_and_retried(self):
+        agent = self.agent([OllamaError('HTTP 400: "model" does not support thinking'),
+                            {"content": "done"}], think="low")
+        self.assertEqual(agent.run("test"), "done")
+        self.assertIsNone(agent.config.think)
+        self.assertEqual(len(self.client.requests), 2)
+
     def test_explicit_native_mode_repairs_without_switching_modes(self):
         agent = self.agent([OllamaError("error parsing tool call: invalid character"),
                             {"tool_calls": [{"function": {"name": "save", "arguments": {"text": "ok"}}}]},
