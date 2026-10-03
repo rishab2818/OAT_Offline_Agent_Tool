@@ -1,13 +1,15 @@
 """Task-independent tools for plain text and source-code files."""
 import fnmatch
 import os
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .registry import string
 from .workspace import ToolError, atomic_write
 
 
 def register_file_tools(registry, workspace, config):
+    excluded_directories = {".git", ".local-agent"}
+
     def resolve(path):
         if not path or "\x00" in path:
             raise ToolError("Path must be nonempty")
@@ -76,6 +78,56 @@ def register_file_tools(registry, workspace, config):
                 return {"paths": matches, "truncated": True, "errors": errors[:10]}
         return {"paths": matches, "truncated": False, "errors": errors[:10]}
 
+    def glob_files(pattern, directory=".", offset=0, limit=500, include_hidden=True):
+        """Match all regular files below a workspace directory without escaping it."""
+        if not pattern or "\x00" in pattern:
+            raise ToolError("pattern must be nonempty")
+        normalized = pattern.replace("\\", "/")
+        pattern_path = PurePosixPath(normalized)
+        windows_pattern = PureWindowsPath(pattern)
+        if (pattern_path.is_absolute() or windows_pattern.is_absolute() or windows_pattern.drive
+                or ".." in pattern_path.parts or ".." in windows_pattern.parts):
+            raise ToolError("glob pattern must be relative and cannot contain '..'")
+        raw_directory = Path(directory).expanduser()
+        if raw_directory.is_absolute():
+            raise ToolError("glob directory must be relative to the workspace")
+        base = (workspace.root / raw_directory).resolve()
+        if not base.is_relative_to(workspace.root):
+            raise ToolError("glob cannot escape the workspace sandbox")
+        if not base.is_dir():
+            raise ToolError("glob directory must be an existing workspace directory")
+        if offset < 0 or not 1 <= limit <= 1000:
+            raise ToolError("offset must be >= 0; limit must be 1..1000")
+
+        matches, errors, scanned = [], [], 0
+        for root, dirs, files in os.walk(base, followlinks=False,
+                                         onerror=lambda error: errors.append(str(error))):
+            root_path = Path(root)
+            dirs[:] = sorted(d for d in dirs
+                              if d.casefold() not in excluded_directories
+                              and not (root_path / d).is_symlink()
+                              and (include_hidden or not d.startswith(".")))
+            for name in sorted(files):
+                path = root_path / name
+                if path.is_symlink() or (not include_hidden and name.startswith(".")):
+                    continue
+                scanned += 1
+                relative_base = path.relative_to(base).as_posix()
+                candidate = PurePosixPath(relative_base)
+                # PurePath treats **/ as requiring a directory on some Python
+                # versions; the second match includes root-level files too.
+                matched = candidate.match(normalized)
+                if not matched and normalized.startswith("**/"):
+                    matched = candidate.match(normalized[3:])
+                if matched:
+                    matches.append(path.relative_to(workspace.root).as_posix())
+        matches.sort(key=str.casefold)
+        page = matches[offset:offset + limit]
+        next_offset = offset + len(page) if offset + len(page) < len(matches) else None
+        return {"paths": page, "offset": offset, "next_offset": next_offset,
+                "total_matches": len(matches), "scanned_files": scanned,
+                "truncated": next_offset is not None, "errors": errors[:10]}
+
     def search_text(path, text):
         if not text:
             raise ToolError("Search text cannot be empty")
@@ -130,6 +182,11 @@ def register_file_tools(registry, workspace, config):
     registry.add("find_files", "Find files by filename or wildcard such as *.md; returns at most 200 paths.", find_files,
                  {"directory": string("Directory to search"), "pattern": string("Filename or wildcard"),
                   "recursive": {"type": "boolean"}}, ["directory", "pattern"])
+    registry.add("glob_files", "Recursively glob every regular file inside the workspace sandbox. Supports **; use offset/next_offset for large result sets.", glob_files,
+                 {"pattern": string("Workspace-relative glob such as **/*.py or src/**/test_*.py"),
+                  "directory": string("Workspace-relative starting directory, default ."),
+                  "offset": {"type": "integer"}, "limit": {"type": "integer"},
+                  "include_hidden": {"type": "boolean"}}, ["pattern"])
     registry.add("read_file", "Read a UTF-8 file in character chunks. Follow next_offset when truncated.", read_file,
                  {"path": string("File path"), "offset": {"type": "integer"}, "length": {"type": "integer"}}, ["path"])
     registry.add("search_text", "Search literal text in one file, ignoring case.", search_text,

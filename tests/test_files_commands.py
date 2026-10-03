@@ -57,6 +57,45 @@ class FileCommandTests(unittest.TestCase):
         self.assertFalse(self.call("write_file", path="../outside.txt", content="x")["ok"])
         self.assertTrue(self.call("write_file", path="inside.txt", content="x")["ok"])
 
+    def test_glob_scans_workspace_with_hidden_files_and_pagination(self):
+        (self.ws.root / "src" / "nested").mkdir(parents=True)
+        (self.ws.root / "src" / "a.py").write_text("a", encoding="utf-8")
+        (self.ws.root / "src" / "nested" / "b.py").write_text("b", encoding="utf-8")
+        (self.ws.root / ".hidden.py").write_text("h", encoding="utf-8")
+        (self.ws.root / "note.txt").write_text("n", encoding="utf-8")
+        first = self.call("glob_files", pattern="**/*.py", limit=2)["result"]
+        self.assertEqual(first["paths"], [".hidden.py", "src/a.py"])
+        self.assertEqual(first["next_offset"], 2)
+        self.assertEqual(first["total_matches"], 3)
+        second = self.call("glob_files", pattern="**/*.py", offset=2, limit=2)["result"]
+        self.assertEqual(second["paths"], ["src/nested/b.py"])
+        self.assertIsNone(second["next_offset"])
+        visible = self.call("glob_files", pattern="**/*", include_hidden=False)["result"]
+        self.assertNotIn(".hidden.py", visible["paths"])
+
+    def test_glob_cannot_escape_workspace_or_follow_symlinks(self):
+        outside = self.root / "outside.py"
+        outside.write_text("secret", encoding="utf-8")
+        for directory in ("..", str(self.root)):
+            result = self.call("glob_files", pattern="**/*", directory=directory)
+            self.assertFalse(result["ok"])
+        self.assertFalse(self.call("glob_files", pattern="../*.py")["ok"])
+        self.assertFalse(self.call("glob_files", pattern=str(outside))["ok"])
+        link = self.ws.root / "outside-link.py"
+        try:
+            link.symlink_to(outside)
+        except OSError:
+            return
+        result = self.call("glob_files", pattern="**/*.py")["result"]
+        self.assertNotIn("outside-link.py", result["paths"])
+
+    def test_glob_never_exposes_internal_directories(self):
+        for name in (".git", ".local-agent"):
+            (self.ws.root / name).mkdir()
+            (self.ws.root / name / "secret.txt").write_text("x", encoding="utf-8")
+        result = self.call("glob_files", pattern="**/*")["result"]
+        self.assertEqual(result["paths"], [])
+
     def test_disabled_tools_are_not_callable(self):
         self.registry.select(["read_file", "list_files"])
         self.assertNotIn("run_command", self.registry.tools)

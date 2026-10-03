@@ -218,12 +218,13 @@ python main.py --prompt-file D:\Tasks\request.txt
 python main.py --workspace D:\AnotherProject -p "Read main.py and explain it"
 ```
 
-## Seven basic tools
+## Eight basic tools
 
 | Tool | Capability |
 | --- | --- |
 | `list_files` | List a directory |
 | `find_files` | Find filenames/wildcards, optionally recursively |
+| `glob_files` | Scan the sandbox recursively with patterns such as `**/*.py` |
 | `read_file` | Read UTF-8 text/code in chunks |
 | `search_text` | Locate literal text and return line numbers |
 | `write_file` | Create a text file or explicitly replace it |
@@ -233,6 +234,10 @@ python main.py --workspace D:\AnotherProject -p "Read main.py and explain it"
 Files can be `.md`, `.txt`, `.c`, `.h`, `.py`, `.ada`, `.json` or other UTF-8 text.
 No PDF/Word parsing is included. There are no document-format dependencies.
 Large reads return `next_offset` rather than pretending the whole file was read.
+Glob results are sorted workspace-relative paths and expose `next_offset` for
+large sandboxes. `glob_files` is always confined to the active workspace: it
+rejects absolute/traversal paths, skips symlinks, and never exposes `.git` or
+`.local-agent`. Hidden files are included by default and can be excluded.
 Text edits preserve existing CRLF line endings. Writes are atomic replacements.
 Non-UTF-8 files produce an encoding error; convert them or use an explicitly
 requested command with the appropriate encoding.

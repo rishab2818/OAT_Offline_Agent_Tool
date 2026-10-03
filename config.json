@@ -7,7 +7,7 @@
   "instruction_files": [],
   "agent_file": null,
   "file_access": "any",
-  "enabled_tools": ["list_files", "find_files", "read_file", "search_text", "write_file", "edit_file", "run_command"],
+  "enabled_tools": ["list_files", "find_files", "glob_files", "read_file", "search_text", "write_file", "edit_file", "run_command"],
   "timeout_seconds": 1800,
   "max_steps": 80,
   "max_repairs": 3,

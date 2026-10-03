@@ -16,7 +16,7 @@ class Config:
     max_stalled_steps: int = 16
     file_access: str = "any"
     enabled_tools: list[str] = field(default_factory=lambda: [
-        "list_files", "find_files", "read_file", "search_text", "write_file", "edit_file", "run_command"])
+        "list_files", "find_files", "glob_files", "read_file", "search_text", "write_file", "edit_file", "run_command"])
     timeout_seconds: int = 1800
     max_steps: int = 80
     max_repairs: int = 3

@@ -18,7 +18,7 @@ from .workspace import ToolError, atomic_write
 
 
 CONTROL_TOOLS = {"plan_task", "task_status", "task_evidence", "expand_task", "complete_task_step", "report_blocker"}
-READ_TOOLS = {"read_file", "list_files", "find_files", "search_text"}
+READ_TOOLS = {"read_file", "list_files", "find_files", "glob_files", "search_text"}
 
 
 def file_digest(path):
@@ -73,9 +73,9 @@ class TaskManager:
             if any(word in text for word in ("run", "execute", "test", "build", "compile", "install", "command")):
                 selected.add("run_command")
             if any(word in text for word in ("find", "search", "locate")):
-                selected |= {"find_files", "search_text"}
+                selected |= {"find_files", "glob_files", "search_text"}
             if any(word in text for word in ("list", "folder", "directory", "files")):
-                selected |= {"list_files", "find_files"}
+                selected |= {"list_files", "find_files", "glob_files"}
             # Ambiguous action prompts retain the complete execution surface so
             # optimization never makes a valid task impossible.
             if selected == {"read_file"} and not any(word in text for word in
@@ -87,7 +87,7 @@ class TaskManager:
             return (READ_TOOLS & self.enabled_tools) | {"plan_task", "task_status", "report_blocker"}
         if current and current.get("kind") == "foreach":
             return ({"expand_task", "task_status", "task_evidence", "report_blocker"}
-                    | ({"read_file", "list_files", "find_files", "run_command"} & self.enabled_tools))
+                    | ({"read_file", "list_files", "find_files", "glob_files", "run_command"} & self.enabled_tools))
         required = {check["name"] for check in (current or {}).get("checks", [])
                     if check.get("type") == "tool"}
         return (required | (READ_TOOLS & self.enabled_tools)
@@ -511,7 +511,7 @@ class TaskManager:
             items = json.loads(value) if isinstance(value, str) else value
         elif format == "paths":
             if not isinstance(value, list):
-                raise ToolError("paths requires a list from find_files or list_files")
+                raise ToolError("paths requires a list from find_files, glob_files or list_files")
             items = [item.get("path") if isinstance(item, dict) else item for item in value]
         else:
             raise ToolError("format must be lines, json or paths")

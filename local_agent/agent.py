@@ -89,12 +89,14 @@ def compact_tool_result(name, result, content_limit=12000, output_limit=8000):
         payload = {"status": value.get("status"), "current": current,
                    "remaining_count": value.get("remaining_count"),
                    "completed": value.get("completed", [])[-5:]}
-    elif name in {"list_files", "find_files", "search_text"}:
+    elif name in {"list_files", "find_files", "glob_files", "search_text"}:
         payload = dict(value)
         for key in ("paths", "entries", "matches"):
             if isinstance(payload.get(key), list) and len(payload[key]) > 100:
                 payload[key] = payload[key][:100]
                 payload["transport_truncated"] = True
+                if key == "paths":
+                    payload["next_offset"] = (value.get("offset", 0) or 0) + 100
     else:
         payload = value
     envelope = {"ok": True, "result": payload}
