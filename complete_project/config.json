@@ -1,0 +1,22 @@
+{
+  "model": "gpt-oss:20b",
+  "base_url": "http://127.0.0.1:11434",
+  "workspace": null,
+  "trace": false,
+  "system_prompt": "prompts/assistant_system.md",
+  "instruction_files": [],
+  "agent_file": null,
+  "file_access": "any",
+  "enabled_tools": ["list_files", "find_files", "read_file", "search_text", "write_file", "edit_file", "run_command"],
+  "timeout_seconds": 1800,
+  "max_steps": 80,
+  "max_repairs": 3,
+  "max_stalled_steps": 16,
+  "max_context_chars": 100000,
+  "max_file_chars": 40000,
+  "command_timeout_seconds": 120,
+  "bash_executable": null,
+  "tool_mode": "auto",
+  "think": "low",
+  "options": {"temperature": 0, "num_ctx": 32768, "num_predict": 4096}
+}
