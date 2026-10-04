@@ -233,6 +233,10 @@ class Agent:
             if self.tasks:
                 allowed = self.tasks.allowed_tools()
                 schemas = [schema for schema in schemas if schema["function"]["name"] in allowed]
+                directive_fn = getattr(self.tasks, "completion_directive", None)
+                directive = directive_fn() if directive_fn else None
+                if directive and not (messages and messages[-1].get("content") == directive):
+                    messages.append({"role": "user", "content": directive})
             self.usage["requests"] += 1
             self.usage["schema_characters"] += len(json.dumps(schemas, separators=(",", ":")))
             self.usage["system_characters"] += len(messages[0]["content"])
@@ -320,6 +324,11 @@ class Agent:
                 calls, source = parse_message(message)
                 for call in calls:
                     if call.name not in allowed:
+                        directive_fn = getattr(self.tasks, "completion_directive", None) if self.tasks else None
+                        directive = directive_fn() if directive_fn else None
+                        if directive:
+                            raise ToolError(f"Tool {call.name!r} is no longer needed because the current "
+                                            f"action's checks already succeeded. {directive}")
                         raise ToolError(f"Tool {call.name!r} is not available for the current action. "
                                         "Available now: " + ", ".join(sorted(allowed)))
                     self.registry.validate(call)

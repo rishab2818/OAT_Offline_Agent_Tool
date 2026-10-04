@@ -113,13 +113,31 @@ class TaskManager:
                     events.append(event)
             try:
                 self._check(current, events)
-                return {"complete_task_step", "task_status", "task_evidence",
-                        "task_summaries", "report_blocker"}
+                # This is a bookkeeping transition, not a loss of capability.
+                # Expose one unambiguous operation so small local models cannot
+                # mistake the absence of execution tools for a blocker.
+                return {"complete_task_step"}
             except ToolError:
                 pass
         required = {check["name"] for check in (current or {}).get("checks", [])
                     if check.get("type") == "tool"}
         return (required | {"task_status", "task_evidence", "task_summaries", "report_blocker"})
+
+    def completion_directive(self):
+        """Describe the exact bookkeeping transition after action checks pass."""
+        if self.allowed_tools() != {"complete_task_step"}:
+            return None
+        current = self.current()
+        evidence_ids = []
+        for number in range(1, self.state.get("next_event", 1)):
+            event = self._event(f"E{number:06d}")
+            if event.get("step_id") == current["id"] and self._successful(event):
+                evidence_ids.append(event["id"])
+        return ("ACTION_CHECKS_SATISFIED: The required work for the current action succeeded. "
+                "This is a normal phase transition, not missing file access and not a blocker. "
+                f"Call complete_task_step now with step_id={current['id']!r}, "
+                f"evidence_ids={evidence_ids!r}, and a factual summary based on the tool result. "
+                "Do not start the next action yet; its tools become available after this step closes.")
 
     def progress(self):
         if not self.state:

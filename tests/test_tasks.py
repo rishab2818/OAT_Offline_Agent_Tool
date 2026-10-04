@@ -70,6 +70,11 @@ class TaskTests(unittest.TestCase):
         allowed = self.manager.allowed_tools()
         self.assertNotIn("read_file", allowed)
         self.assertIn("complete_task_step", allowed)
+        self.assertEqual({"complete_task_step"}, allowed)
+        directive = self.manager.completion_directive()
+        self.assertIn("ACTION_CHECKS_SATISFIED", directive)
+        self.assertIn("step_id='read'", directive)
+        self.assertIn(result["evidence_id"], directive)
         self.manager.complete_task_step("read", [result["evidence_id"]], "Input contains test content")
 
     def test_incomplete_action_hides_completion_until_checks_are_satisfied(self):
@@ -389,7 +394,7 @@ class TaskTests(unittest.TestCase):
 
     def test_no_progress_stops_incomplete_instead_of_looping(self):
         config = Config(trace=False, max_stalled_steps=2)
-        replies = [call("plan_task", steps=[action("answer", [{"type": "answer"}])])] + [call("task_status")] * 3
+        replies = [call("plan_task", steps=[action("read", [tool("read_file", path="input.txt")])])] + [call("task_status")] * 3
         agent = Agent(FakeClient(replies), self.registry, config, "Test", Log(), emit=lambda _: None, tasks=self.manager)
         with self.assertRaisesRegex(AgentError, "No plan progress"):
             agent.run("do work")

@@ -1,3 +1,3 @@
 """Reusable, standard-library-only local Ollama tool agent."""
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
