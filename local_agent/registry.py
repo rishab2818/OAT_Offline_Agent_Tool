@@ -1,4 +1,5 @@
 """Explicit tool registration, argument validation and dispatch."""
+import copy
 from dataclasses import dataclass
 
 from .workspace import ToolError
@@ -15,8 +16,8 @@ class Tool:
     def schema(self):
         return {"type": "function", "function": {
             "name": self.name, "description": self.description,
-            "parameters": {"type": "object", "properties": self.properties,
-                           "required": self.required, "additionalProperties": False}}}
+            "parameters": {"type": "object", "properties": copy.deepcopy(self.properties),
+                           "required": list(self.required), "additionalProperties": False}}}
 
 
 class Registry:

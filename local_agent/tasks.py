@@ -139,6 +139,36 @@ class TaskManager:
                 f"evidence_ids={evidence_ids!r}, and a factual summary based on the tool result. "
                 "Do not start the next action yet; its tools become available after this step closes.")
 
+    def expected_tool_call(self):
+        """Return deterministic arguments for the next chunk of a planned read."""
+        current = self.current() if self.state and self.state.get("steps") else None
+        if not current or current.get("kind") != "action" or current.get("adaptive"):
+            return None
+        for check in current.get("checks", []):
+            if check.get("type") != "tool" or check.get("name") != "read_file":
+                continue
+            expected = check.get("arguments", {})
+            path = expected.get("path")
+            if not isinstance(path, str):
+                continue
+            prior = [self._event(f"E{number:06d}") for number in range(1, self.state["next_event"])]
+            prior = [event for event in prior if event.get("step_id") == current["id"]
+                     and event.get("tool") == "read_file" and self._successful(event)
+                     and self._matches(event.get("arguments", {}), {"path": path})]
+            position, complete = self._read_coverage(prior)
+            if not complete:
+                return {"name": "read_file", "arguments": {"path": path, "offset": position}}
+        return None
+
+    def execution_directive(self):
+        expected = self.expected_tool_call()
+        if not expected:
+            return None
+        return ("CURRENT_ACTION_CALL: Continue only the current planned action. Call "
+                f"{expected['name']} with exactly path={expected['arguments']['path']!r} and "
+                f"offset={expected['arguments']['offset']}. Do not advance to another file until "
+                "the host completes this action.")
+
     def progress(self):
         if not self.state:
             return None
@@ -674,8 +704,10 @@ class TaskManager:
                              if check.get("type") == "tool" and check.get("name") == "read_file"]
             if planned_reads and not any(self._matches(call.arguments, expected) for expected in planned_reads):
                 expected_paths = [entry.get("path") for entry in planned_reads if entry.get("path")]
+                directive = self.execution_directive()
                 raise ToolError(f"read_file does not belong to current step {step_id}. "
-                                f"Read and summarize the planned file first: {', '.join(expected_paths)}")
+                                f"Read and summarize the planned file first: {', '.join(expected_paths)}. "
+                                + (directive or ""))
             matching_plan = next((expected for expected in planned_reads
                                   if self._matches(call.arguments, expected)), None)
             if matching_plan and "path" in matching_plan and "offset" not in matching_plan:

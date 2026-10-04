@@ -83,6 +83,9 @@ class TaskTests(unittest.TestCase):
         allowed = self.manager.allowed_tools()
         self.assertIn("read_file", allowed)
         self.assertNotIn("complete_task_step", allowed)
+        self.assertEqual({"name": "read_file", "arguments": {"path": "input.txt", "offset": 0}},
+                         self.manager.expected_tool_call())
+        self.assertIn("path='input.txt'", self.manager.execution_directive())
 
     def test_plan_schema_describes_actions_groups_and_disallows_host_fields(self):
         schema = self.registry.tools["plan_task"].properties["steps"]
@@ -143,6 +146,10 @@ class TaskTests(unittest.TestCase):
         (self.root / "long.txt").write_text("abcdef", encoding="utf-8")
         self.manager.plan_task([action("read", [tool("read_file", path="long.txt")])])
         first = self.execute("read_file", path="long.txt", length=2)
+        self.assertEqual({"name": "read_file", "arguments": {"path": "long.txt", "offset": 2}},
+                         self.manager.expected_tool_call())
+        with self.assertRaisesRegex(ToolError, "path='long.txt'.*offset=2"):
+            self.execute("read_file", path="other.txt")
         with self.assertRaisesRegex(ToolError, "truncated"):
             self.manager.complete_task_step("read", [first["evidence_id"]], "partial")
         with self.assertRaisesRegex(ToolError, "offset 2"):

@@ -235,6 +235,23 @@ class Agent:
                 schemas = [schema for schema in schemas if schema["function"]["name"] in allowed]
                 directive_fn = getattr(self.tasks, "completion_directive", None)
                 directive = directive_fn() if directive_fn else None
+                expected_fn = getattr(self.tasks, "expected_tool_call", None)
+                expected = expected_fn() if expected_fn else None
+                if expected:
+                    for schema in schemas:
+                        function = schema["function"]
+                        if function["name"] != expected["name"]:
+                            continue
+                        parameters = function["parameters"]
+                        for key, value in expected["arguments"].items():
+                            if key in parameters["properties"]:
+                                parameters["properties"][key]["enum"] = [value]
+                                if key not in parameters["required"]:
+                                    parameters["required"].append(key)
+                    execution_fn = getattr(self.tasks, "execution_directive", None)
+                    execution_directive = execution_fn() if execution_fn else None
+                    if execution_directive and not (messages and messages[-1].get("content") == execution_directive):
+                        messages.append({"role": "user", "content": execution_directive})
                 if directive and not (messages and messages[-1].get("content") == directive):
                     messages.append({"role": "user", "content": directive})
             self.usage["requests"] += 1
