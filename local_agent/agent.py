@@ -386,7 +386,8 @@ class Agent:
                 self.log.write("tool", name=call.name, arguments=call.arguments, result=result)
                 if self.config.trace:
                     display_trace(self.emit, "TOOL RESULT -> MODEL", {"name": call.name, **result})
-                compact_result = compact_tool_result(call.name, result)
+                compact_result = compact_tool_result(call.name, result,
+                                                     content_limit=self.config.read_chunk_chars)
                 self.usage["tool_result_characters"] += len(compact_result)
                 messages.append({"role": "tool", "tool_name": call.name, "content": compact_result})
                 if not result["ok"]:

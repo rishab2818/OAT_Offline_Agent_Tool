@@ -266,7 +266,8 @@ def _main(argv=None):
             tasks = TaskManager(workspace, directory, config.enabled_tools, requirements,
                                 direct_mode=False if requirements else None,
                                 metadata={"model": config.model, "context_tokens": config.options.get("num_ctx"),
-                                          "tool_mode": config.tool_mode})
+                                          "tool_mode": config.tool_mode,
+                                          "read_chunk_chars": config.read_chunk_chars})
             tasks.register(registry)
             registry.select(list(config.enabled_tools) + sorted(CONTROL_TOOLS))
             ui.banner(__version__, config, log.path)

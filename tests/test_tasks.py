@@ -133,10 +133,25 @@ class TaskTests(unittest.TestCase):
         first = self.execute("read_file", path="long.txt", length=2)
         with self.assertRaisesRegex(ToolError, "truncated"):
             self.manager.complete_task_step("read", [first["evidence_id"]], "partial")
+        with self.assertRaisesRegex(ToolError, "offset 2"):
+            self.execute("read_file", path="long.txt", offset=0, length=2)
         second = self.execute("read_file", path="long.txt", offset=2, length=4)
         self.manager.complete_task_step("read", [first["evidence_id"], second["evidence_id"]], "read all six characters")
         summaries = self.manager.task_summaries()["summaries"]
         self.assertEqual(summaries[0]["summary"], "read all six characters")
+
+    def test_legacy_oversized_read_evidence_is_recovered_from_model_visible_offset(self):
+        (self.root / "legacy.txt").write_text("x" * 15000, encoding="utf-8")
+        self.config.read_chunk_chars = 40000
+        self.manager.plan_task([action("read", [tool("read_file", path="legacy.txt")])])
+        legacy = self.execute("read_file", path="legacy.txt")
+        with self.assertRaisesRegex(ToolError, "truncated"):
+            self.manager.complete_task_step("read", [legacy["evidence_id"]], "legacy partial transport")
+        self.config.read_chunk_chars = 12000
+        with self.assertRaisesRegex(ToolError, "offset 12000"):
+            self.execute("read_file", path="legacy.txt", offset=0)
+        tail = self.execute("read_file", path="legacy.txt", offset=12000)
+        self.manager.complete_task_step("read", [legacy["evidence_id"], tail["evidence_id"]], "all visible")
 
     def test_command_nonzero_is_not_completion_evidence(self):
         self.registry.add("run_command", "test", lambda: {"exit_code": 9, "stdout": "", "timed_out": False})

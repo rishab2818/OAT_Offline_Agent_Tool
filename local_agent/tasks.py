@@ -659,6 +659,17 @@ class TaskManager:
                 expected_paths = [entry.get("path") for entry in planned_reads if entry.get("path")]
                 raise ToolError(f"read_file does not belong to current step {step_id}. "
                                 f"Read and summarize the planned file first: {', '.join(expected_paths)}")
+            matching_plan = next((expected for expected in planned_reads
+                                  if self._matches(call.arguments, expected)), None)
+            if matching_plan and "path" in matching_plan and "offset" not in matching_plan:
+                prior = [self._event(f"E{number:06d}") for number in range(1, self.state["next_event"])]
+                prior = [event for event in prior if event.get("step_id") == step_id
+                         and event.get("tool") == "read_file" and self._successful(event)
+                         and self._matches(event.get("arguments", {}), {"path": matching_plan["path"]})]
+                position, complete = self._read_coverage(prior)
+                requested = call.arguments.get("offset", 0)
+                if not complete and requested != position:
+                    raise ToolError(f"Continue the planned file at offset {position}; received offset {requested}")
         if call.name in {"write_file", "edit_file"} and step and not step.get("adaptive"):
             allowed = False
             for check in step.get("checks", []):
@@ -793,6 +804,22 @@ class TaskManager:
                 return False
         return True
 
+    def _read_coverage(self, reads):
+        position, complete = 0, False
+        visible_limit = self.state.get("metadata", {}).get("read_chunk_chars", 12000)
+        for event in sorted(reads, key=lambda item: item.get("arguments", {}).get("offset", 0)):
+            data = event.get("result", {}).get("result", {})
+            start = event.get("arguments", {}).get("offset", 0)
+            if start > position:
+                break
+            content_length = len(data.get("content", ""))
+            visible_length = min(content_length, visible_limit)
+            position = max(position, start + visible_length)
+            if data.get("next_offset") is None and content_length <= visible_limit:
+                complete = True
+                break
+        return position, complete
+
     def _check(self, step, events):
         for check in step["checks"]:
             if check["type"] == "tool":
@@ -805,16 +832,7 @@ class TaskManager:
                     reads = sorted((e for e in events if e["tool"] == "read_file"
                                     and self._matches(e["arguments"], {"path": expected["path"]})),
                                    key=lambda event: event["arguments"].get("offset", 0))
-                    position, complete = 0, False
-                    for event in reads:
-                        data = event.get("result", {}).get("result", {})
-                        start = event["arguments"].get("offset", 0)
-                        if start > position:
-                            break
-                        position = max(position, start + len(data.get("content", "")))
-                        if data.get("next_offset") is None:
-                            complete = True
-                            break
+                    _, complete = self._read_coverage(reads)
                     if not complete:
                         raise ToolError("read_file evidence is truncated; follow next_offset until the entire file is read")
             elif check["type"] == "file":

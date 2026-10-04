@@ -22,6 +22,7 @@ class Config:
     max_repairs: int = 3
     max_context_chars: int = 100000
     max_file_chars: int = 40000
+    read_chunk_chars: int = 12000
     command_timeout_seconds: int = 120
     bash_executable: str | None = None
     tool_mode: str = "auto"
@@ -52,7 +53,7 @@ class Config:
             raise ValueError("trace must be true or false")
         if config.tool_mode not in {"auto", "native", "json"}:
             raise ValueError("tool_mode must be auto, native, or json")
-        for key in ("timeout_seconds", "max_steps", "max_repairs", "max_context_chars", "max_file_chars", "command_timeout_seconds", "max_stalled_steps"):
+        for key in ("timeout_seconds", "max_steps", "max_repairs", "max_context_chars", "max_file_chars", "read_chunk_chars", "command_timeout_seconds", "max_stalled_steps"):
             if type(getattr(config, key)) is not int or getattr(config, key) < 1:
                 raise ValueError(f"{key} must be a positive integer")
         if not isinstance(config.instruction_files, list) or not all(

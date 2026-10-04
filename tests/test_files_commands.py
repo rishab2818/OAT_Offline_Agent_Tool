@@ -37,6 +37,8 @@ class FileCommandTests(unittest.TestCase):
         tail = self.call("read_file", path=str(target), offset=5)["result"]
         self.assertEqual(tail["content"], " beta gamma")
         self.assertFalse(tail["truncated"])
+        too_large = self.call("read_file", path=str(target), length=self.config.read_chunk_chars + 1)
+        self.assertFalse(too_large["ok"])
 
     def test_overwrite_is_explicit(self):
         self.call("write_file", path="note.md", content="original")

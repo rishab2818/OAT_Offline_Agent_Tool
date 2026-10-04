@@ -29,9 +29,9 @@ def register_file_tools(registry, workspace, config):
 
     def read_file(path, offset=0, length=None):
         target = resolve(path)
-        length = config.max_file_chars if length is None else length
-        if offset < 0 or not 1 <= length <= config.max_file_chars:
-            raise ToolError(f"offset must be >= 0; length must be 1..{config.max_file_chars}")
+        length = config.read_chunk_chars if length is None else length
+        if offset < 0 or not 1 <= length <= config.read_chunk_chars:
+            raise ToolError(f"offset must be >= 0; length must be 1..{config.read_chunk_chars}")
         with target.open(encoding="utf-8-sig") as stream:
             remaining = offset
             while remaining:

@@ -233,7 +233,10 @@ python main.py --workspace D:\AnotherProject -p "Read main.py and explain it"
 
 Files can be `.md`, `.txt`, `.c`, `.h`, `.py`, `.ada`, `.json` or other UTF-8 text.
 No PDF/Word parsing is included. There are no document-format dependencies.
-Large reads return `next_offset` rather than pretending the whole file was read.
+Large reads use model-visible chunks (`read_chunk_chars`, 12,000 characters by
+default) and return `next_offset` rather than pretending the whole file was read.
+For planned full-file work, OAT enforces that exact continuation offset and will
+not accept gaps, overlaps, or a truncated final read as completion evidence.
 Glob results are sorted workspace-relative paths and expose `next_offset` for
 large sandboxes. `glob_files` is always confined to the active workspace: it
 rejects absolute/traversal paths, skips symlinks, and never exposes `.git` or
