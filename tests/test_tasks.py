@@ -72,6 +72,13 @@ class TaskTests(unittest.TestCase):
         self.assertIn("complete_task_step", allowed)
         self.manager.complete_task_step("read", [result["evidence_id"]], "Input contains test content")
 
+    def test_incomplete_action_hides_completion_until_checks_are_satisfied(self):
+        (self.root / "input.txt").write_text("content", encoding="utf-8")
+        self.manager.plan_task([action("read", [tool("read_file", path="input.txt")])])
+        allowed = self.manager.allowed_tools()
+        self.assertIn("read_file", allowed)
+        self.assertNotIn("complete_task_step", allowed)
+
     def test_plan_schema_describes_actions_groups_and_disallows_host_fields(self):
         schema = self.registry.tools["plan_task"].properties["steps"]
         action_schema, group_schema = schema["items"]["anyOf"]
@@ -494,7 +501,7 @@ class TaskTests(unittest.TestCase):
         self.manager.plan_task([action("read", [tool("read_file", path="input.txt")])])
         allowed = self.manager.allowed_tools()
         self.assertIn("read_file", allowed)
-        self.assertIn("complete_task_step", allowed)
+        self.assertNotIn("complete_task_step", allowed)
         self.assertNotIn("write_file", allowed)
         self.assertNotIn("run_command", allowed)
 

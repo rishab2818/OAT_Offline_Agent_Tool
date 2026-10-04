@@ -119,8 +119,7 @@ class TaskManager:
                 pass
         required = {check["name"] for check in (current or {}).get("checks", [])
                     if check.get("type") == "tool"}
-        return (required | {"complete_task_step", "task_status", "task_evidence",
-                            "task_summaries", "report_blocker"})
+        return (required | {"task_status", "task_evidence", "task_summaries", "report_blocker"})
 
     def progress(self):
         if not self.state:
