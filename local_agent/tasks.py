@@ -17,7 +17,7 @@ from .task_schema import plan_steps_schema
 from .workspace import ToolError, atomic_write
 
 
-CONTROL_TOOLS = {"plan_task", "task_status", "task_evidence", "expand_task", "complete_task_step", "report_blocker"}
+CONTROL_TOOLS = {"plan_task", "task_status", "task_evidence", "task_summaries", "expand_task", "complete_task_step", "report_blocker"}
 READ_TOOLS = {"read_file", "list_files", "find_files", "glob_files", "search_text"}
 
 
@@ -36,7 +36,10 @@ class TaskManager:
         self.directory.mkdir(exist_ok=True)
         self.enabled_tools = set(enabled_tools)
         self.requirements = list(requirements or [])
-        self.direct_mode = bool(direct_mode)
+        # True/False explicitly select a mode; None lets request complexity
+        # choose. This keeps small jobs fast without flattening bulk work into
+        # one ever-growing conversation.
+        self.direct_mode = direct_mode
         self.metadata = dict(metadata or {})
         self.state = None
         self.folder = None
@@ -46,7 +49,7 @@ class TaskManager:
         self.folder = private_path(self.directory, task_id)
         self.folder.mkdir()
         (self.folder / "evidence").mkdir()
-        direct = self.direct_mode
+        direct = self._automatic_direct(prompt) if self.direct_mode is None else bool(self.direct_mode)
         steps = ([{"id": "execute_request", "title": "Execute requested task", "kind": "action",
                    "status": "pending", "checks": [], "evidence": [], "adaptive": True}]
                  if direct else [])
@@ -58,9 +61,23 @@ class TaskManager:
                       "requirements": copy.deepcopy(self.requirements)}
         self._save()
 
+    @staticmethod
+    def _automatic_direct(prompt):
+        """Use a durable plan for repository-wide, repeated, or multi-output work."""
+        text = " ".join(prompt.casefold().split())
+        bulk_phrases = ("every file", "each file", "all files", "entire repository",
+                        "whole repository", "don't miss", "do not miss", "for each",
+                        "comprehensive summary", "scan the", "recursively")
+        bulk_hits = sum(phrase in text for phrase in bulk_phrases)
+        collection_words = sum(word in text for word in
+                               (" files", " directory", " folder", " repository", " codebase"))
+        # Two strong bulk signals, or one repeated-work signal plus a named
+        # collection, are enough to justify resumable host-tracked planning.
+        return not (bulk_hits >= 2 or (bulk_hits >= 1 and collection_words >= 2))
+
     def allowed_tools(self):
         """Return only tools useful for the current host-owned action."""
-        controls = {"report_blocker", "task_evidence"}
+        controls = {"report_blocker", "task_evidence", "task_summaries"}
         if not self.state:
             return set(self.enabled_tools) | controls
         if self.state.get("direct"):
@@ -86,12 +103,24 @@ class TaskManager:
         if not self.state.get("steps"):
             return (READ_TOOLS & self.enabled_tools) | {"plan_task", "task_status", "report_blocker"}
         if current and current.get("kind") == "foreach":
-            return ({"expand_task", "task_status", "task_evidence", "report_blocker"}
+            return ({"expand_task", "task_status", "task_evidence", "task_summaries", "report_blocker"}
                     | ({"read_file", "list_files", "find_files", "glob_files", "run_command"} & self.enabled_tools))
+        if current and current.get("kind") == "action":
+            events = []
+            for number in range(1, self.state.get("next_event", 1)):
+                event = self._event(f"E{number:06d}")
+                if event.get("step_id") == current["id"] and self._successful(event):
+                    events.append(event)
+            try:
+                self._check(current, events)
+                return {"complete_task_step", "task_status", "task_evidence",
+                        "task_summaries", "report_blocker"}
+            except ToolError:
+                pass
         required = {check["name"] for check in (current or {}).get("checks", [])
                     if check.get("type") == "tool"}
-        return (required | (READ_TOOLS & self.enabled_tools)
-                | {"complete_task_step", "task_status", "task_evidence", "report_blocker"})
+        return (required | {"complete_task_step", "task_status", "task_evidence",
+                            "task_summaries", "report_blocker"})
 
     def progress(self):
         if not self.state:
@@ -347,6 +376,15 @@ class TaskManager:
             raise ToolError("No task loaded")
         return self._event(evidence_id)
 
+    def task_summaries(self):
+        """Return every durable completed-step summary for final aggregation."""
+        self._active()
+        return {"summaries": [
+            {"id": step["id"], "item": step.get("item"),
+             "summary": step.get("summary", ""), "evidence": step.get("evidence", [])}
+            for step in self._all() if step.get("status") == "done" and step.get("summary")
+        ]}
+
     def _validate_steps(self, steps, depth=0):
         if depth > 1 or not isinstance(steps, list) or not 1 <= len(steps) <= 100:
             raise ToolError("Plan needs 1..100 steps; foreach groups contain action templates, not nested foreach groups")
@@ -598,12 +636,29 @@ class TaskManager:
     def before_tool(self, call):
         if self.state["status"] in {"blocked", "complete"}:
             raise ToolError("Task is " + self.state["status"])
+        if not self.state["steps"] and call.name == "glob_files":
+            request = " ".join(self.state.get("request", "").casefold().split())
+            named = {match for match in re.findall(r"\b([a-z0-9_.-]+) directory\b", request)
+                     if match not in {"root", "the", "a"}}
+            pattern = call.arguments.get("pattern", "").replace("\\", "/")
+            if "root directory" in request and named and "**" in pattern:
+                names = ", ".join(sorted(named))
+                raise ToolError("The request scopes root-level files and named directories separately. "
+                                "Do not use a broad ** glob. Discover root with glob_files pattern='*' "
+                                f"directory='.', then discover each named directory ({names}) with pattern='*'.")
         if not self.state["steps"] and call.name not in READ_TOOLS:
             raise ToolError("Create the runtime plan with plan_task before changing files or executing commands")
         if self.state["steps"] and self.current() is None:
             raise ToolError("All plan steps are done; return the final answer")
         step = self.current()
         step_id = step["id"] if step else "discovery"
+        if call.name == "read_file" and step and not step.get("adaptive"):
+            planned_reads = [check.get("arguments", {}) for check in step.get("checks", [])
+                             if check.get("type") == "tool" and check.get("name") == "read_file"]
+            if planned_reads and not any(self._matches(call.arguments, expected) for expected in planned_reads):
+                expected_paths = [entry.get("path") for entry in planned_reads if entry.get("path")]
+                raise ToolError(f"read_file does not belong to current step {step_id}. "
+                                f"Read and summarize the planned file first: {', '.join(expected_paths)}")
         if call.name in {"write_file", "edit_file"} and step and not step.get("adaptive"):
             allowed = False
             for check in step.get("checks", []):
@@ -649,6 +704,7 @@ class TaskManager:
                 event["file"] = {"path": str(Path(path).resolve()), "sha256": file_digest(Path(path))}
         atomic_write(private_path(self.folder / "evidence", event_id + ".json"), json.dumps(event, ensure_ascii=False))
         self.state["inflight"] = None
+        self._maybe_build_scoped_file_plan()
         if self.state.get("direct") and self._successful(event):
             step = self.current()
             if step and step.get("adaptive"):
@@ -657,6 +713,76 @@ class TaskManager:
                 self.state["revision"] += 1
         self._save()
         return {**result, "evidence_id": event_id}
+
+    def _maybe_build_scoped_file_plan(self):
+        """Deterministically expand explicit root + named-directory review work."""
+        if self.state.get("direct") or self.state.get("steps") or self.state.get("status") != "planning":
+            return
+        request = " ".join(self.state.get("request", "").casefold().split())
+        named = sorted({match for match in re.findall(r"\b([a-z0-9_.-]+) directory\b", request)
+                        if match not in {"root", "the", "a"}})
+        if "root directory" not in request or not named or not any(
+                phrase in request for phrase in ("every file", "each file", "all files", "don't miss", "do not miss")):
+            return
+        output_match = re.search(r"\b(?:in|to|as)\s+([a-z0-9_.-]+\.md)\b", request)
+        output = output_match.group(1) if output_match else "output.md"
+        discoveries = {}
+        for number in range(1, self.state["next_event"]):
+            event = self._event(f"E{number:06d}")
+            if event.get("tool") not in {"glob_files", "list_files"} or not self._successful(event):
+                continue
+            arguments = event.get("arguments", {})
+            data = event.get("result", {}).get("result", {})
+            if data.get("truncated"):
+                continue
+            raw_directory = arguments.get("directory", ".")
+            directory_path = (self.ws.root / raw_directory).resolve()
+            if not directory_path.is_relative_to(self.ws.root):
+                continue
+            directory = directory_path.relative_to(self.ws.root).as_posix() or "."
+            if event["tool"] == "glob_files":
+                if arguments.get("pattern") != "*":
+                    continue
+                paths = data.get("paths", [])
+            else:
+                paths = [Path(item["path"]).resolve().relative_to(self.ws.root).as_posix()
+                         for item in data.get("items", []) if item.get("type") == "file"
+                         and Path(item.get("path", "")).resolve().is_relative_to(self.ws.root)]
+            discoveries[directory] = (event["id"], [path for path in paths if path != output])
+        expected = [".", *named]
+        if any(directory not in discoveries for directory in expected):
+            return
+        raw_steps = []
+        for index, directory in enumerate(expected, 1):
+            label = "root" if directory == "." else directory
+            raw_steps.append({"id": f"review_{index}", "title": f"Review every file in {label}",
+                              "kind": "foreach", "steps": [{
+                                  "id": "summarize", "title": "Read fully and summarize {item}",
+                                  "kind": "action", "checks": [{"type": "tool", "name": "read_file",
+                                                                    "arguments": {"path": "{item}"}}]}]})
+        raw_steps.append({"id": "write_report", "title": f"Write comprehensive {output}", "kind": "action",
+                          "checks": [{"type": "tool", "name": "write_file", "arguments": {"path": output}},
+                                     {"type": "file", "path": output}]})
+        self.plan_task(raw_steps)
+        for group, directory in zip(self.state["steps"], expected):
+            evidence_id, items = discoveries[directory]
+            template = group["template"][0]
+            children = []
+            for index, item in enumerate(items, 1):
+                def instantiate(value):
+                    if isinstance(value, str):
+                        return value.replace("{item}", item).replace("{name}", Path(item).name).replace("{index}", str(index))
+                    if isinstance(value, list):
+                        return [instantiate(entry) for entry in value]
+                    if isinstance(value, dict):
+                        return {key: instantiate(entry) for key, entry in value.items()}
+                    return value
+                child = instantiate(template)
+                child["id"] = f"{group['id']}.{index}.{template['id']}"
+                child["item"] = item
+                children.append(child)
+            group.update(expanded=True, children=children, evidence=[evidence_id], item_count=len(items))
+        self._save()
 
     def _matches(self, actual, expected):
         for key, value in expected.items():
@@ -670,8 +796,27 @@ class TaskManager:
     def _check(self, step, events):
         for check in step["checks"]:
             if check["type"] == "tool":
-                if not any(e["tool"] == check["name"] and self._matches(e["arguments"], check.get("arguments", {})) for e in events):
+                matching = [e for e in events if e["tool"] == check["name"]
+                            and self._matches(e["arguments"], check.get("arguments", {}))]
+                if not matching:
                     raise ToolError(f"No successful evidence for required tool: {check}")
+                expected = check.get("arguments", {})
+                if check["name"] == "read_file" and "path" in expected and "offset" not in expected:
+                    reads = sorted((e for e in events if e["tool"] == "read_file"
+                                    and self._matches(e["arguments"], {"path": expected["path"]})),
+                                   key=lambda event: event["arguments"].get("offset", 0))
+                    position, complete = 0, False
+                    for event in reads:
+                        data = event.get("result", {}).get("result", {})
+                        start = event["arguments"].get("offset", 0)
+                        if start > position:
+                            break
+                        position = max(position, start + len(data.get("content", "")))
+                        if data.get("next_offset") is None:
+                            complete = True
+                            break
+                    if not complete:
+                        raise ToolError("read_file evidence is truncated; follow next_offset until the entire file is read")
             elif check["type"] == "file":
                 path = (self.ws.root / check["path"]).resolve()
                 # The check must be tied to an actual read/write of THIS file.
@@ -805,6 +950,8 @@ class TaskManager:
         registry.add("task_evidence", "Retrieve a persisted real tool result by ID, including after resume. "
                      "Does not execute the tool again.", self.task_evidence,
                      {"evidence_id": string("Recorded evidence ID, e.g. E000001")}, ["evidence_id"])
+        registry.add("task_summaries", "Retrieve all completed step summaries for final aggregation without rereading files.",
+                     self.task_summaries)
         registry.add("expand_task", "Expand the current foreach using a real tool result; never supply invented items. "
                      "field is a dotted path inside result; format lines/json/paths.", self.expand_task,
                      {"step_id": string("Current foreach ID"), "evidence_id": string("Successful discovery tool evidence_id"),

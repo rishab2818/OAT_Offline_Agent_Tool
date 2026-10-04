@@ -57,6 +57,21 @@ class TaskTests(unittest.TestCase):
         with self.assertRaisesRegex(ToolError, "does not belong to current step"):
             self.execute("write_file", path="out.txt", content="too early")
 
+    def test_read_cannot_skip_the_file_named_by_current_step(self):
+        self.manager.plan_task([action("first", [tool("read_file", path="input.txt")]),
+                                action("second", [tool("read_file", path="other.txt")])])
+        with self.assertRaisesRegex(ToolError, "planned file first"):
+            self.execute("read_file", path="other.txt")
+
+    def test_satisfied_action_hides_execution_tools_until_completed(self):
+        (self.root / "input.txt").write_text("test content", encoding="utf-8")
+        self.manager.plan_task([action("read", [tool("read_file", path="input.txt")])])
+        result = self.execute("read_file", path="input.txt")
+        allowed = self.manager.allowed_tools()
+        self.assertNotIn("read_file", allowed)
+        self.assertIn("complete_task_step", allowed)
+        self.manager.complete_task_step("read", [result["evidence_id"]], "Input contains test content")
+
     def test_plan_schema_describes_actions_groups_and_disallows_host_fields(self):
         schema = self.registry.tools["plan_task"].properties["steps"]
         action_schema, group_schema = schema["items"]["anyOf"]
@@ -111,6 +126,17 @@ class TaskTests(unittest.TestCase):
         self.manager.complete_task_step("first", [result["evidence_id"]], "read")
         with self.assertRaisesRegex(ToolError, "another step"):
             self.manager.complete_task_step("second", [result["evidence_id"]], "done")
+
+    def test_full_file_check_rejects_truncated_read_until_all_chunks_exist(self):
+        (self.root / "long.txt").write_text("abcdef", encoding="utf-8")
+        self.manager.plan_task([action("read", [tool("read_file", path="long.txt")])])
+        first = self.execute("read_file", path="long.txt", length=2)
+        with self.assertRaisesRegex(ToolError, "truncated"):
+            self.manager.complete_task_step("read", [first["evidence_id"]], "partial")
+        second = self.execute("read_file", path="long.txt", offset=2, length=4)
+        self.manager.complete_task_step("read", [first["evidence_id"], second["evidence_id"]], "read all six characters")
+        summaries = self.manager.task_summaries()["summaries"]
+        self.assertEqual(summaries[0]["summary"], "read all six characters")
 
     def test_command_nonzero_is_not_completion_evidence(self):
         self.registry.add("run_command", "test", lambda: {"exit_code": 9, "stdout": "", "timed_out": False})
@@ -385,6 +411,50 @@ class TaskTests(unittest.TestCase):
         names = {schema["function"]["name"] for schema in client.schemas[0]}
         self.assertNotIn("plan_task", names)
         self.assertNotIn("complete_task_step", names)
+
+    def test_automatic_mode_plans_bulk_work_but_keeps_small_work_direct(self):
+        bulk = TaskManager(self.ws, self.directory, self.config.enabled_tools, direct_mode=None)
+        bulk.begin("Scan every file in this repository and write a comprehensive summary; don't miss any file")
+        self.assertFalse(bulk.state["direct"])
+        self.assertEqual(bulk.state["status"], "planning")
+        small = TaskManager(self.ws, self.directory, self.config.enabled_tools, direct_mode=None)
+        small.begin("Create odd.py and run it")
+        self.assertTrue(small.state["direct"])
+        self.assertEqual(small.state["status"], "active")
+
+    def test_planning_rejects_broad_glob_when_request_names_exact_directory_levels(self):
+        manager = TaskManager(self.ws, self.directory, self.config.enabled_tools, direct_mode=None)
+        manager.begin("Scan the root directory every file and the src directory every file")
+        with self.assertRaisesRegex(ToolError, "Do not use a broad"):
+            manager.before_tool(Call("glob_files", {"pattern": "**/*"}))
+        event, cached = manager.before_tool(Call("glob_files", {"pattern": "*", "directory": "."}))
+        self.assertIsNone(cached)
+        self.assertEqual(event, "E000001")
+
+    def test_scoped_file_review_plan_is_host_built_with_every_discovered_file(self):
+        (self.root / "src").mkdir()
+        (self.root / "root.md").write_text("root", encoding="utf-8")
+        (self.root / "src" / "a.adb").write_text("a", encoding="utf-8")
+        (self.root / "src" / "b.ads").write_text("b", encoding="utf-8")
+        registry = Registry()
+        register_file_tools(registry, self.ws, self.config)
+        manager = TaskManager(self.ws, self.directory, self.config.enabled_tools, direct_mode=None)
+        manager.register(registry)
+        manager.begin("Scan the root directory every file and src directory every file; write it in output.md; don't miss any")
+        for name, arguments in (("glob_files", {"pattern": "*", "directory": "."}),
+                                ("list_files", {"directory": "src"})):
+            call = Call(name, arguments)
+            event, _ = manager.before_tool(call)
+            manager.after_tool(event, registry.execute(call))
+        self.assertEqual(manager.state["status"], "active")
+        groups = manager.state["steps"][:2]
+        self.assertTrue(all(group["expanded"] for group in groups))
+        items = [child["item"] for group in groups for child in group["children"]]
+        self.assertIn("root.md", items)
+        self.assertEqual([item for item in items if item.startswith("src/")], ["src/a.adb", "src/b.ads"])
+        plan = (manager.folder / "plan.md").read_text(encoding="utf-8")
+        self.assertIn("Read fully and summarize src/a.adb", plan)
+        self.assertIn("Read fully and summarize src/b.ads", plan)
 
     def test_history_review_records_model_and_artifacts(self):
         registry = Registry()

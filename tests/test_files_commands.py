@@ -72,6 +72,10 @@ class FileCommandTests(unittest.TestCase):
         self.assertIsNone(second["next_offset"])
         visible = self.call("glob_files", pattern="**/*", include_hidden=False)["result"]
         self.assertNotIn(".hidden.py", visible["paths"])
+        root_only = self.call("glob_files", pattern="*")["result"]
+        self.assertEqual(root_only["paths"], [".hidden.py", "note.txt"])
+        src_only = self.call("glob_files", pattern="*", directory="src")["result"]
+        self.assertEqual(src_only["paths"], ["src/a.py"])
 
     def test_glob_cannot_escape_workspace_or_follow_symlinks(self):
         outside = self.root / "outside.py"

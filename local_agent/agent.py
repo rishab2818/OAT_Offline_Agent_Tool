@@ -229,6 +229,7 @@ class Agent:
                                  "or use /reset and split the task; no evidence was silently truncated.")
             self.emit(f"[model] step {step}, mode={self.mode}")
             schemas = self.registry.schemas()
+            allowed = set(self.registry.tools)
             if self.tasks:
                 allowed = self.tasks.allowed_tools()
                 schemas = [schema for schema in schemas if schema["function"]["name"] in allowed]
@@ -318,6 +319,9 @@ class Agent:
                             message = {**message, "content": envelope["answer"]}
                 calls, source = parse_message(message)
                 for call in calls:
+                    if call.name not in allowed:
+                        raise ToolError(f"Tool {call.name!r} is not available for the current action. "
+                                        "Available now: " + ", ".join(sorted(allowed)))
                     self.registry.validate(call)
             except (ProtocolError, ToolError) as exc:
                 failures += 1
@@ -333,7 +337,7 @@ class Agent:
                                  "Return one valid tool call using the supplied schema. "
                                  "Use a bare tool name, not tool.run_command or a namespace prefix. "
                                  'Shape: {"tool_calls":[{"function":{"name":"REGISTERED_NAME","arguments":{}}}]}. '
-                                 "Registered names: " + ", ".join(self.registry.tools)})
+                                 "Available names for the current action: " + ", ".join(sorted(allowed))})
                 continue
             if not calls:
                 answer = message.get("content", "")

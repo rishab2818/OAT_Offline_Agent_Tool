@@ -264,7 +264,7 @@ def _main(argv=None):
             register_command_tools(registry, workspace, config)
             requirements = workflow_contract(instruction_documents)
             tasks = TaskManager(workspace, directory, config.enabled_tools, requirements,
-                                direct_mode=not requirements,
+                                direct_mode=False if requirements else None,
                                 metadata={"model": config.model, "context_tokens": config.options.get("num_ctx"),
                                           "tool_mode": config.tool_mode})
             tasks.register(registry)

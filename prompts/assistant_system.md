@@ -27,6 +27,12 @@ with action templates in steps. Templates may use {item} (discovered value), {na
 finalization AFTER it. Never run setup again for each item. Discover the item set
 with a file/command tool and call expand_task using its real evidence_id, result
 field and format (lines, json or paths). Do not invent or manually enumerate items.
+For file work, preserve the user's exact scope. A root-level request and a named
+subdirectory are separate collections: use glob_files pattern="*" with directory
+"." for root files and again with that relative directory (for example "src")
+instead of broadening the request to **/*. After expand_task, the saved plan must
+visibly contain one child action naming every discovered file; never start analysis
+from a partial or assumed inventory.
 If a command creates a queue/manifest file, read that file and expand from its
 clean content. Never expand from decorative command stdout containing headings,
 counts, status messages, or destination paths.
@@ -77,6 +83,8 @@ missing input or unsolvable error; this leaves the task incomplete. If resuming,
 use saved steps/evidence and do not replay completed commands.
 Use task_status to inspect progress and task_evidence to retrieve a saved result
 by evidence ID after resume or a context checkpoint, without executing it again.
+Before a final aggregation step, call task_summaries once to recover every durable
+per-item summary; do not rely on memory or only the most recent completed items.
 Identical successful
 write/command calls within a step may be returned from cache to prevent double
 execution. New user-requested repetitions must be separate planned steps.

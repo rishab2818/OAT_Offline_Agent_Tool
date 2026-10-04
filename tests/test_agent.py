@@ -1,5 +1,6 @@
 import json
 import unittest
+from pathlib import Path
 
 from local_agent.agent import Agent, AgentError, compact_tool_result
 from local_agent.config import Config
@@ -54,6 +55,34 @@ class AgentTests(unittest.TestCase):
             {"function": {"name": "unknown", "arguments": {}}}]}, {"content": "No changes."}])
         agent.run("test")
         self.assertEqual(self.executed, [])
+
+    def test_tool_hidden_for_current_action_is_rejected_before_execution(self):
+        hidden = []
+        self.registry.add("hidden", "hidden", lambda: hidden.append(True))
+        class Tasks:
+            state = None
+            folder = Path(".")
+            def begin(self, _):
+                self.state = {"direct": True, "steps": [], "revision": 0, "status": "active"}
+            def current(self):
+                return None
+            def allowed_tools(self):
+                return {"save"}
+            def finalize(self):
+                return None
+            def progress(self):
+                return None
+            def block(self, _):
+                pass
+        self.client = FakeClient([
+            {"tool_calls": [{"function": {"name": "hidden", "arguments": {}}}]},
+            {"content": "corrected"}])
+        agent = Agent(self.client, self.registry, Config(), "Test", Log(), emit=lambda _: None, tasks=Tasks())
+        self.assertEqual(agent.run("test"), "corrected")
+        self.assertEqual(hidden, [])
+        self.assertEqual([schema["function"]["name"] for schema in self.client.schemas[0]], ["save"])
+        self.assertIn("Available names for the current action: save",
+                      self.client.requests[1][-1]["content"])
 
     def test_api_tool_failure_falls_back_to_text(self):
         agent = self.agent([OllamaError("model does not support tools"),

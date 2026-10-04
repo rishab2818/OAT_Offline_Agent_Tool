@@ -116,7 +116,10 @@ def register_file_tools(registry, workspace, config):
                 candidate = PurePosixPath(relative_base)
                 # PurePath treats **/ as requiring a directory on some Python
                 # versions; the second match includes root-level files too.
-                matched = candidate.match(normalized)
+                if "/" not in normalized:
+                    matched = "/" not in relative_base and fnmatch.fnmatchcase(relative_base, normalized)
+                else:
+                    matched = candidate.match(normalized)
                 if not matched and normalized.startswith("**/"):
                     matched = candidate.match(normalized[3:])
                 if matched:

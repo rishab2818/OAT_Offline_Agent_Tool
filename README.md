@@ -238,6 +238,14 @@ Glob results are sorted workspace-relative paths and expose `next_offset` for
 large sandboxes. `glob_files` is always confined to the active workspace: it
 rejects absolute/traversal paths, skips symlinks, and never exposes `.git` or
 `.local-agent`. Hidden files are included by default and can be excluded.
+
+Repository-wide requests automatically use a durable plan instead of the fast
+single-action path. When a request names root files and another directory such
+as `src`, OAT inventories those levels separately and writes one visible plan
+row per discovered file. Each row is locked to its named file, truncated reads
+cannot complete it, and the next file remains unavailable until the current
+summary is saved. Tools hidden from the current action are rejected before
+execution even if a model hallucinates their names.
 Text edits preserve existing CRLF line endings. Writes are atomic replacements.
 Non-UTF-8 files produce an encoding error; convert them or use an explicitly
 requested command with the appropriate encoding.
